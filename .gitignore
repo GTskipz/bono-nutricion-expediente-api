@@ -1,0 +1,34 @@
+# Entornos virtuales
+venv/
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Variables de entorno
+.env
+.env.*
+.envrc
+
+# IDEs / Editores
+.vscode/
+.idea/
+*.swp
+
+# SO
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Tests / Coverage
+.coverage
+htmlcov/
+
+# Build
+dist/
+build/
