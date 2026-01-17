@@ -1,30 +1,73 @@
-import uuid
 from datetime import datetime
-from sqlalchemy import String, Integer, DateTime, Text, BigInteger
-from sqlalchemy.dialects.postgresql import UUID
+
+from sqlalchemy import (
+    String,
+    Integer,
+    DateTime,
+    Text,
+    BigInteger,
+    ForeignKey,
+    CheckConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
+
 from app.core.db import Base
+
 
 class DocumentosYAnexos(Base):
     __tablename__ = "documentos_y_anexos"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    __table_args__ = (
+        CheckConstraint("tab IN ('DOCUMENTOS','ANEXOS')", name="chk_doc_tab"),
+        CheckConstraint(
+            "estado IN ('NO_ADJUNTADO','ADJUNTADO','RECHAZADO')",
+            name="chk_doc_estado",
+        ),
+    )
 
-    expediente_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # ✅ PK numérica
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+    # ✅ FK numérica al expediente
+    expediente_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("expediente_electronico.id", ondelete="CASCADE"),
+        nullable=False,
+    )
 
     tab: Mapped[str] = mapped_column(String(20), nullable=False)  # DOCUMENTOS | ANEXOS
-    tipo_documento_id: Mapped[int | None] = mapped_column(Integer)
-    estado: Mapped[str] = mapped_column(String(20), nullable=False, default="NO_ADJUNTADO")
+
+    # FK a catálogo tipo documento
+    tipo_documento_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("cat_tipo_documento.id")
+    )
+
+    estado: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="NO_ADJUNTADO"
+    )
 
     filename: Mapped[str | None] = mapped_column(String(255))
     mime_type: Mapped[str | None] = mapped_column(String(120))
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)
-    storage_provider: Mapped[str | None] = mapped_column(String(30))
-    storage_key: Mapped[str | None] = mapped_column(String(500))
-    checksum_sha256: Mapped[str | None] = mapped_column(String(64))
 
-    subido_por: Mapped[str | None] = mapped_column(String(120))
+    storage_provider: Mapped[str | None] = mapped_column(String(80))
+    storage_key: Mapped[str | None] = mapped_column(String(500))
+
+    checksum_sha256: Mapped[str | None] = mapped_column(String(80))
+
+    subido_por: Mapped[str | None] = mapped_column(String(255))
     observacion: Mapped[str | None] = mapped_column(Text)
-    descripcion: Mapped[str | None] = mapped_column(String(250))
+    descripcion: Mapped[str | None] = mapped_column(String(255))

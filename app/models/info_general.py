@@ -1,8 +1,6 @@
-import uuid
 from datetime import date
 
-from sqlalchemy import String, Integer, Text, Date, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import String, Integer, Text, Date, ForeignKey, BigInteger
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -11,13 +9,14 @@ from app.core.db import Base
 class InfoGeneral(Base):
     __tablename__ = "info_general"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    # ✅ PK numérica
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True
     )
 
-    # 1:1 con expediente
-    expediente_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+    # 1:1 con expediente (FK numérica)
+    expediente_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("expediente_electronico.id", ondelete="CASCADE"),
         unique=True,
         nullable=False,

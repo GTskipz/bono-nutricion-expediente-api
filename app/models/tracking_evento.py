@@ -1,18 +1,17 @@
-import uuid
 from datetime import datetime
-from sqlalchemy import String, Text, DateTime
-from sqlalchemy.dialects.postgresql import UUID
+
+from sqlalchemy import String, Text, DateTime, BigInteger, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
+
 from app.core.db import Base
 
 
 class TrackingEvento(Base):
     __tablename__ = "tracking_evento"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid.uuid4,
+    # ✅ PK numérica
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True
     )
 
     created_at: Mapped[datetime] = mapped_column(
@@ -21,9 +20,12 @@ class TrackingEvento(Base):
         default=datetime.utcnow,
     )
 
-    expediente_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+    # ✅ FK numérica al expediente
+    expediente_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("expediente_electronico.id", ondelete="CASCADE"),
         nullable=False,
+        index=True,  # recomendado para consultas por expediente
     )
 
     fecha_evento: Mapped[datetime] = mapped_column(

@@ -1,8 +1,7 @@
-import uuid
 from datetime import datetime
 
-from sqlalchemy import String, Integer, DateTime, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy import String, Integer, DateTime, ForeignKey, BigInteger
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -11,8 +10,9 @@ from app.core.db import Base
 class ExpedienteElectronico(Base):
     __tablename__ = "expediente_electronico"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    # ✅ PK numérica (BIGINT IDENTITY en DB)
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True
     )
 
     created_at: Mapped[datetime] = mapped_column(
@@ -30,11 +30,15 @@ class ExpedienteElectronico(Base):
     nombre_beneficiario: Mapped[str | None] = mapped_column(String(255))
     cui_beneficiario: Mapped[str | None] = mapped_column(String(50))
 
+    # ✅ NUEVO: RUB (Registro Único de Beneficiario) - VARCHAR sin limitar formato
+    rub: Mapped[str | None] = mapped_column(String(100))
+
     # ✅ Regla MIS (según tu SQL): NOT NULL
+    # Nota: en tu SQL dijiste que lo manda el frontend, pero dejamos fallback por seguridad.
     anio_carga: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
-        default=lambda: datetime.utcnow().year,  # fallback si no viene
+        default=lambda: datetime.utcnow().year,
     )
 
     # Territorio (FK)
@@ -47,13 +51,13 @@ class ExpedienteElectronico(Base):
 
     # Estado MIS
     estado_expediente: Mapped[str] = mapped_column(
-        String(30), nullable=False, default="ABIERTO"
+        String(30), nullable=False, default="ABIERTO", index=True
     )
 
     # BPM (snapshot)
     bpm_process_key: Mapped[str | None] = mapped_column(String(120))
     bpm_instance_id: Mapped[str | None] = mapped_column(String(120), unique=True)
-    bpm_status: Mapped[str | None] = mapped_column(String(30))
+    bpm_status: Mapped[str | None] = mapped_column(String(30), index=True)
     bpm_current_task_key: Mapped[str | None] = mapped_column(String(120))
     bpm_current_task_name: Mapped[str | None] = mapped_column(String(255))
     bpm_variables: Mapped[dict | None] = mapped_column(JSONB)

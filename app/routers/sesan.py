@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from uuid import UUID
 from datetime import datetime, date
 import hashlib
 import json
@@ -80,6 +79,38 @@ def _to_cui(v):
     return s
 
 
+def _to_rub(v):
+    """
+    Normaliza RUB:
+    - Si es int -> str(int)
+    - Si es float tipo 12345.0 -> "12345"
+    - Si es string numérico con .0 -> "12345"
+    - Si es texto (ej. "#") -> se guarda tal cual
+    - Vacío -> None
+    """
+    if v is None:
+        return None
+
+    if isinstance(v, int):
+        return str(v)
+
+    if isinstance(v, float):
+        try:
+            return str(int(v))
+        except Exception:
+            s = str(v).strip()
+            return s if s != "" else None
+
+    s = str(v).strip()
+    if s == "":
+        return None
+
+    if re.fullmatch(r"\d+\.0+", s):
+        return s.split(".")[0]
+
+    return s
+
+
 def _norm_lookup(s: str | None) -> str | None:
     if s is None:
         return None
@@ -121,7 +152,6 @@ def _sexo_id(db: Session, value: str | None) -> int | None:
     else:
         return None
 
-    # intenta por codigo primero, luego por nombre
     sid = _cat_id_by_name(db, "cat_sexo", "codigo", code)
     if sid is None:
         sid = _cat_id_by_name(db, "cat_sexo", "nombre", code)
@@ -135,7 +165,6 @@ def _validacion_id(db: Session, raw: str | None) -> int | None:
     s = _norm_lookup(raw)
     if not s:
         return None
-    # ejemplos típicos
     if s in ("VALIDO", "VÁLIDO"):
         vid = _cat_id_by_name(db, "cat_validacion", "codigo", "VALIDO")
         if vid is None:
@@ -157,10 +186,19 @@ def norm_header(s) -> str:
     - quita acentos (AÑO->ANO, NIÑO->NINO)
     - deja A-Z0-9 y espacios
     - colapsa espacios
+
+    ✅ Caso especial:
+    - si el header literal es "#", significa RUB.
     """
     if s is None:
         return ""
-    s = str(s).strip().upper()
+    raw = str(s).strip()
+
+    # ✅ Header "#" representa RUB
+    if raw == "#":
+        return "RUB"
+
+    s = raw.upper()
     s = unicodedata.normalize("NFKD", s)
     s = "".join(ch for ch in s if not unicodedata.combining(ch))  # quita acentos
     s = re.sub(r"[^A-Z0-9\s]", " ", s)  # quita símbolos, deja espacios
@@ -247,10 +285,18 @@ def _read_sesan_xlsx_rows(file_bytes: bytes) -> list[dict]:
         "NOMBRE DEL NIÑO": "NOMBRE DEL NINO",
         "AÑO": "ANO",
         "ANIO": "ANO",
+
+        # ✅ RUB (si en otros formatos)
+        "REGISTRO UNICO DE BENEFICIARIO": "RUB",
+        "REGISTRO ÚNICO DE BENEFICIARIO": "RUB",
+        "REGISTRO UNICO BENEFICIARIO": "RUB",
+        "REGISTRO ÚNICO BENEFICIARIO": "RUB",
     }
     norm_headers = [ALIASES.get(h, h) for h in norm_headers]
 
     CANON = {
+        "RUB": "RUB",
+
         "ANO": "ANO",
         "MES": "MES",
         "AREA DE SALUD": "AREA_DE_SALUD",
@@ -279,7 +325,7 @@ def _read_sesan_xlsx_rows(file_bytes: bytes) -> list[dict]:
     }
 
     present = {h for h in norm_headers if h}
-    required_min = {"CUI DEL NINO", "NOMBRE DEL NINO", "ANO", "MES"}
+    required_min = {"CUI DEL NINO", "NOMBRE DEL NINO", "ANO", "MES"}  # RUB es opcional
     missing = sorted(required_min - present)
     if missing:
         raise HTTPException(
@@ -318,12 +364,12 @@ def _read_sesan_xlsx_rows(file_bytes: bytes) -> list[dict]:
     return rows
 
 
-def _recalc_batch_counts(db: Session, batch_id: UUID):
+def _recalc_batch_counts(db: Session, batch_id: int):
     """
     Recalcula contadores y actualiza sesan_batch.
     También actualiza estado del batch:
       - si no hay pendientes -> FINALIZADO
-      - si hay pendientes/errores/procesados -> EN_REVISION
+      - si hay pendientes -> EN_REVISION
       - si total=0 -> CARGADO
     """
     counts = db.execute(
@@ -337,7 +383,7 @@ def _recalc_batch_counts(db: Session, batch_id: UUID):
             FROM sesan_staging
             WHERE batch_id = :batch_id
         """),
-        {"batch_id": str(batch_id)},
+        {"batch_id": batch_id},
     ).mappings().one()
 
     total = int(counts["total"] or 0)
@@ -367,7 +413,7 @@ def _recalc_batch_counts(db: Session, batch_id: UUID):
             WHERE id = :batch_id
         """),
         {
-            "batch_id": str(batch_id),
+            "batch_id": batch_id,
             "total": total,
             "pendientes": pendientes,
             "procesados": procesados,
@@ -378,7 +424,7 @@ def _recalc_batch_counts(db: Session, batch_id: UUID):
     )
 
 
-def _set_row_error(db: Session, row_id: UUID, code: str, msg: str):
+def _set_row_error(db: Session, row_id: int, code: str, msg: str):
     db.execute(
         text("""
             UPDATE sesan_staging
@@ -391,11 +437,11 @@ def _set_row_error(db: Session, row_id: UUID, code: str, msg: str):
               updated_at = NOW()
             WHERE id = :id
         """),
-        {"id": str(row_id), "code": code, "msg": msg},
+        {"id": row_id, "code": code, "msg": msg},
     )
 
 
-def _set_row_processed(db: Session, row_id: UUID, expediente_id: UUID):
+def _set_row_processed(db: Session, row_id: int, expediente_id: int):
     db.execute(
         text("""
             UPDATE sesan_staging
@@ -409,11 +455,11 @@ def _set_row_processed(db: Session, row_id: UUID, expediente_id: UUID):
               updated_at = NOW()
             WHERE id = :id
         """),
-        {"id": str(row_id), "expediente_id": str(expediente_id)},
+        {"id": row_id, "expediente_id": expediente_id},
     )
 
 
-def _is_dup_cui_in_year(db: Session, cui_nino: str, anio_carga: int, current_row_id: UUID) -> bool:
+def _is_dup_cui_in_year(db: Session, cui_nino: str, anio_carga: int, current_row_id: int) -> bool:
     """
     Regla: No se puede repetir CUI por año de carga (anio_carga viene del batch).
     Validación contra staging ya PROCESADO en cualquier batch del mismo anio_carga.
@@ -429,7 +475,7 @@ def _is_dup_cui_in_year(db: Session, cui_nino: str, anio_carga: int, current_row
               AND s.id <> :row_id
             LIMIT 1
         """),
-        {"anio": anio_carga, "cui": cui_nino, "row_id": str(current_row_id)},
+        {"anio": anio_carga, "cui": cui_nino, "row_id": current_row_id},
     ).scalar()
     return bool(exists)
 
@@ -452,10 +498,49 @@ def _is_dup_cui_in_expedientes(db: Session, cui_nino: str, anio_carga: int) -> b
     return bool(exists)
 
 
+def _is_dup_rub_in_year(db: Session, rub: str, anio_carga: int, current_row_id: int) -> bool:
+    """
+    Regla: No se puede repetir RUB por año de carga.
+    Validación contra staging ya PROCESADO en cualquier batch del mismo anio_carga.
+    """
+    exists = db.execute(
+        text("""
+            SELECT 1
+            FROM sesan_staging s
+            JOIN sesan_batch b ON b.id = s.batch_id
+            WHERE b.anio_carga = :anio
+              AND s.estado = 'PROCESADO'
+              AND s.rub = :rub
+              AND s.id <> :row_id
+            LIMIT 1
+        """),
+        {"anio": anio_carga, "rub": rub, "row_id": current_row_id},
+    ).scalar()
+    return bool(exists)
+
+
+def _is_dup_rub_in_expedientes(db: Session, rub: str, anio_carga: int) -> bool:
+    """
+    Refuerzo de regla: valida RUB también contra expediente_electronico.
+    """
+    exists = db.execute(
+        text("""
+            SELECT 1
+            FROM expediente_electronico e
+            WHERE e.rub = :rub
+              AND e.anio_carga = :anio
+            LIMIT 1
+        """),
+        {"rub": rub, "anio": anio_carga},
+    ).scalar()
+    return bool(exists)
+
+
 def _build_expediente_payload_from_row(db: Session, row: dict, anio_carga: int, mes_carga: int | None):
     """
     Normaliza y mapea sesan_staging -> ExpedienteCreate (con InfoGeneralIn)
     """
+    rub = _to_rub(row.get("rub"))
     cui_nino = _to_cui(row.get("cui_nino"))
     nombre_nino = _norm_str(row.get("nombre_nino"))
 
@@ -471,7 +556,6 @@ def _build_expediente_payload_from_row(db: Session, row: dict, anio_carga: int, 
     sexo_id = _sexo_id(db, row.get("sexo"))
     validacion_id = _validacion_id(db, row.get("validacion_raw"))  # si None -> core pone INVALIDO
 
-    # Usamos anio_carga como “anio” de MIS (regla de negocio)
     ig_anio = str(anio_carga)
     ig_mes = str(_to_int(row.get("mes")) or mes_carga or "") or None
 
@@ -510,23 +594,24 @@ def _build_expediente_payload_from_row(db: Session, row: dict, anio_carga: int, 
         validacion_id=validacion_id,
     )
 
-    # Expediente “principal”
     payload = ExpedienteCreate(
         nombre_beneficiario=nombre_nino,
         cui_beneficiario=cui_nino,
+        rub=rub,
         departamento_id=depto_res_id,
         municipio_id=muni_res_id,
+        anio_carga=anio_carga,
         info_general=ig,
     )
 
     return payload
 
 
-def _procesar_row_creando_expediente(db: Session, row_id: UUID):
+def _procesar_row_creando_expediente(db: Session, row_id: int):
     """
     Procesa 1 fila:
     - valida mínimos
-    - regla no duplicar
+    - regla no duplicar (CUI + RUB)
     - normaliza + crea expediente
     - marca PROCESADO con expediente_id
     """
@@ -541,7 +626,7 @@ def _procesar_row_creando_expediente(db: Session, row_id: UUID):
             WHERE s.id = :id
             FOR UPDATE
         """),
-        {"id": str(row_id)},
+        {"id": row_id},
     ).mappings().first()
 
     if not row:
@@ -552,14 +637,15 @@ def _procesar_row_creando_expediente(db: Session, row_id: UUID):
 
     if row["estado"] == "PROCESADO" and row.get("expediente_id"):
         return {
-            "row_id": str(row_id),
+            "row_id": row_id,
             "estado": "PROCESADO",
-            "expediente_id": str(row["expediente_id"]),
+            "expediente_id": int(row["expediente_id"]),
         }
 
     anio_carga = int(row["anio_carga"])
     mes_carga = int(row["mes_carga"]) if row.get("mes_carga") is not None else None
 
+    rub = _to_rub(row.get("rub"))
     cui = _to_cui(row.get("cui_nino"))
     nombre = _norm_str(row.get("nombre_nino"))
 
@@ -568,28 +654,34 @@ def _procesar_row_creando_expediente(db: Session, row_id: UUID):
     if not nombre:
         raise ValueError("MISSING_NAME|Nombre del niño vacío.")
 
+    # Validación duplicados por CUI
     if _is_dup_cui_in_year(db, cui, anio_carga, row_id):
         raise ValueError(f"DUP_CUI_YEAR|CUI duplicado en el año de carga {anio_carga} (staging).")
-
     if _is_dup_cui_in_expedientes(db, cui, anio_carga):
         raise ValueError(f"DUP_CUI_YEAR|CUI duplicado en el año de carga {anio_carga} (expedientes).")
 
-    # construir payload ya normalizado
+    # Validación duplicados por RUB (si viene)
+    if rub is not None and rub != "":
+        if _is_dup_rub_in_year(db, rub, anio_carga, row_id):
+            raise ValueError(f"DUP_RUB_YEAR|RUB duplicado en el año de carga {anio_carga} (staging).")
+        if _is_dup_rub_in_expedientes(db, rub, anio_carga):
+            raise ValueError(f"DUP_RUB_YEAR|RUB duplicado en el año de carga {anio_carga} (expedientes).")
+
     payload = _build_expediente_payload_from_row(db, row, anio_carga, mes_carga)
 
     # ✅ crear expediente usando el CORE oficial
     exp = crear_expediente_core(payload, db)
 
     # marcar fila procesada con expediente_id
-    _set_row_processed(db, row_id, exp.id)
+    _set_row_processed(db, row_id, int(exp.id))
 
     # recalcular batch
-    _recalc_batch_counts(db, UUID(str(row["batch_id"])))
+    _recalc_batch_counts(db, int(row["batch_id"]))
 
     return {
-        "row_id": str(row_id),
+        "row_id": row_id,
         "estado": "PROCESADO",
-        "expediente_id": str(exp.id),
+        "expediente_id": int(exp.id),
     }
 
 
@@ -668,6 +760,8 @@ def crear_batch_sesan(
             }
         ).scalar_one()
 
+        batch_id = int(batch_id)
+
         rows = _read_sesan_xlsx_rows(file_bytes)
         if not rows:
             raise HTTPException(status_code=422, detail="No se encontraron filas válidas.")
@@ -675,6 +769,7 @@ def crear_batch_sesan(
         insert_staging = text("""
             INSERT INTO sesan_staging (
               batch_id, row_num,
+              rub,
               anio, mes, area_salud, distrito_salud, servicio_salud,
               departamento_residencia, municipio_residencia, comunidad_residencia, direccion_residencia,
               cui_nino, sexo, edad_en_anios, nombre_nino,
@@ -688,6 +783,7 @@ def crear_batch_sesan(
             )
             VALUES (
               :batch_id, :row_num,
+              :rub,
               :anio, :mes, :area_salud, :distrito_salud, :servicio_salud,
               :departamento_residencia, :municipio_residencia, :comunidad_residencia, :direccion_residencia,
               :cui_nino, :sexo, :edad_en_anios, :nombre_nino,
@@ -709,8 +805,11 @@ def crear_batch_sesan(
             db.execute(
                 insert_staging,
                 {
-                    "batch_id": str(batch_id),
+                    "batch_id": batch_id,
                     "row_num": item["excel_row"],
+
+                    # ✅ RUB: si viene como número 123.0 -> "123"; si viene "#" -> "#"
+                    "rub": _to_rub(r.get("RUB")),
 
                     "anio": _to_int(r.get("ANO")),
                     "mes": _to_int(r.get("MES")),
@@ -748,11 +847,11 @@ def crear_batch_sesan(
             )
             total += 1
 
-        _recalc_batch_counts(db, UUID(str(batch_id)))
+        _recalc_batch_counts(db, batch_id)
         db.commit()
 
         return {
-            "batch_id": str(batch_id),
+            "batch_id": batch_id,
             "total_registros": total,
             "storage_key": storage_key,
             "checksum_sha256": checksum,
@@ -798,59 +897,7 @@ def listar_batches_por_anio(
     return {
         "page": page,
         "limit": limit,
-        "total": total,
-        "data": [dict(r) for r in rows],
-    }
-
-
-# =====================================================
-# 3) Listar filas por batch
-# =====================================================
-@router.get("/batch/{batch_id}/rows")
-def listar_filas_batch(
-    batch_id: UUID,
-    estado: str | None = Query(None, description="PENDIENTE | ERROR | PROCESADO | IGNORADO"),
-    page: int = Query(1, ge=1),
-    limit: int = Query(50, ge=1, le=200),
-    db: Session = Depends(get_db),
-):
-    offset = (page - 1) * limit
-
-    base = "FROM sesan_staging WHERE batch_id = :batch_id"
-    params = {"batch_id": str(batch_id)}
-
-    if estado:
-        base += " AND estado = :estado"
-        params["estado"] = estado
-
-    total = db.execute(
-        text(f"SELECT COUNT(*) {base}"),
-        params,
-    ).scalar() or 0
-
-    rows = db.execute(
-        text(f"""
-            SELECT
-              id, row_num, estado, error_code, error_mensaje,
-              cui_nino, nombre_nino,
-              departamento_residencia, municipio_residencia,
-              cie_10, diagnostico,
-              expediente_id,
-              intentos, ultimo_intento_at,
-              corregido_por, corregido_at,
-              ignorado_por, ignorado_at, motivo_ignorado
-            {base}
-            ORDER BY row_num ASC
-            OFFSET :offset
-            LIMIT :limit
-        """),
-        {**params, "offset": offset, "limit": limit},
-    ).mappings().all()
-
-    return {
-        "page": page,
-        "limit": limit,
-        "total": total,
+        "total": int(total),
         "data": [dict(r) for r in rows],
     }
 
@@ -870,9 +917,62 @@ def listar_anios_sesan(db: Session = Depends(get_db)):
 
     return {
         "data": [
-            {"anio_carga": r["anio_carga"], "total_batches": r["total_batches"]}
+            {"anio_carga": r["anio_carga"], "total_batches": int(r["total_batches"])}
             for r in rows
         ]
+    }
+
+
+# =====================================================
+# 3) Listar filas por batch
+# =====================================================
+@router.get("/batch/{batch_id}/rows")
+def listar_filas_batch(
+    batch_id: int,
+    estado: str | None = Query(None, description="PENDIENTE | ERROR | PROCESADO | IGNORADO"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    offset = (page - 1) * limit
+
+    base = "FROM sesan_staging WHERE batch_id = :batch_id"
+    params = {"batch_id": batch_id}
+
+    if estado:
+        base += " AND estado = :estado"
+        params["estado"] = estado
+
+    total = db.execute(
+        text(f"SELECT COUNT(*) {base}"),
+        params,
+    ).scalar() or 0
+
+    rows = db.execute(
+        text(f"""
+            SELECT
+              id, row_num, estado, error_code, error_mensaje,
+              rub,
+              cui_nino, nombre_nino,
+              departamento_residencia, municipio_residencia,
+              cie_10, diagnostico,
+              expediente_id,
+              intentos, ultimo_intento_at,
+              corregido_por, corregido_at,
+              ignorado_por, ignorado_at, motivo_ignorado
+            {base}
+            ORDER BY row_num ASC
+            OFFSET :offset
+            LIMIT :limit
+        """),
+        {**params, "offset": offset, "limit": limit},
+    ).mappings().all()
+
+    return {
+        "page": page,
+        "limit": limit,
+        "total": int(total),
+        "data": [dict(r) for r in rows],
     }
 
 
@@ -882,7 +982,7 @@ def listar_anios_sesan(db: Session = Depends(get_db)):
 
 @router.post("/batch/{batch_id}/procesar-pendientes")
 def procesar_pendientes_batch(
-    batch_id: UUID,
+    batch_id: int,
     limit: int = Query(200, ge=1, le=2000),
     db: Session = Depends(get_db),
 ):
@@ -892,7 +992,7 @@ def procesar_pendientes_batch(
     try:
         batch = db.execute(
             text("SELECT id, anio_carga FROM sesan_batch WHERE id = :id"),
-            {"id": str(batch_id)},
+            {"id": batch_id},
         ).mappings().first()
 
         if not batch:
@@ -907,19 +1007,18 @@ def procesar_pendientes_batch(
                 ORDER BY row_num ASC
                 LIMIT :limit
             """),
-            {"batch_id": str(batch_id), "limit": limit},
+            {"batch_id": batch_id, "limit": limit},
         ).mappings().all()
 
         procesados = 0
         errores = 0
 
         for r in rows:
-            rid = UUID(str(r["id"]))
+            rid = int(r["id"])
             try:
                 _procesar_row_creando_expediente(db, rid)
                 procesados += 1
             except ValueError as ve:
-                # formato: CODE|Mensaje
                 raw = str(ve)
                 if "|" in raw:
                     code, msg = raw.split("|", 1)
@@ -938,7 +1037,7 @@ def procesar_pendientes_batch(
         db.commit()
 
         return {
-            "batch_id": str(batch_id),
+            "batch_id": batch_id,
             "procesados": procesados,
             "errores": errores,
             "total_intentados": len(rows),
@@ -954,7 +1053,7 @@ def procesar_pendientes_batch(
 
 @router.post("/row/{row_id}/procesar")
 def procesar_row(
-    row_id: UUID,
+    row_id: int,
     db: Session = Depends(get_db),
 ):
     """
@@ -976,11 +1075,13 @@ def procesar_row(
         else:
             code, msg = "VALIDATION_ERROR", raw
         _set_row_error(db, row_id, code.strip(), msg.strip())
-        # recalcular batch (si existe)
         try:
-            b = db.execute(text("SELECT batch_id FROM sesan_staging WHERE id=:id"), {"id": str(row_id)}).scalar()
-            if b:
-                _recalc_batch_counts(db, UUID(str(b)))
+            b = db.execute(
+                text("SELECT batch_id FROM sesan_staging WHERE id=:id"),
+                {"id": row_id},
+            ).scalar()
+            if b is not None:
+                _recalc_batch_counts(db, int(b))
             db.commit()
         except Exception:
             db.rollback()
@@ -989,9 +1090,12 @@ def procesar_row(
         db.rollback()
         _set_row_error(db, row_id, "UNEXPECTED_ERROR", str(e))
         try:
-            b = db.execute(text("SELECT batch_id FROM sesan_staging WHERE id=:id"), {"id": str(row_id)}).scalar()
-            if b:
-                _recalc_batch_counts(db, UUID(str(b)))
+            b = db.execute(
+                text("SELECT batch_id FROM sesan_staging WHERE id=:id"),
+                {"id": row_id},
+            ).scalar()
+            if b is not None:
+                _recalc_batch_counts(db, int(b))
             db.commit()
         except Exception:
             db.rollback()
@@ -1000,7 +1104,7 @@ def procesar_row(
 
 @router.post("/batch/{batch_id}/reintentar-errores")
 def reintentar_errores_batch(
-    batch_id: UUID,
+    batch_id: int,
     limit: int = Query(2000, ge=1, le=50000),
     db: Session = Depends(get_db),
 ):
@@ -1029,14 +1133,14 @@ def reintentar_errores_batch(
                 WHERE s.id = u.id
                 RETURNING s.id
             """),
-            {"batch_id": str(batch_id), "limit": limit},
+            {"batch_id": batch_id, "limit": limit},
         ).fetchall()
 
         _recalc_batch_counts(db, batch_id)
         db.commit()
 
         return {
-            "batch_id": str(batch_id),
+            "batch_id": batch_id,
             "rows_reintentadas": len(updated),
         }
 
@@ -1050,7 +1154,7 @@ def reintentar_errores_batch(
 
 @router.post("/row/{row_id}/reintentar")
 def reintentar_row(
-    row_id: UUID,
+    row_id: int,
     db: Session = Depends(get_db),
 ):
     """
@@ -1059,7 +1163,7 @@ def reintentar_row(
     try:
         row = db.execute(
             text("SELECT id, batch_id FROM sesan_staging WHERE id = :id"),
-            {"id": str(row_id)},
+            {"id": row_id},
         ).mappings().first()
 
         if not row:
@@ -1075,13 +1179,13 @@ def reintentar_row(
                   updated_at = NOW()
                 WHERE id = :id
             """),
-            {"id": str(row_id)},
+            {"id": row_id},
         )
 
-        _recalc_batch_counts(db, UUID(str(row["batch_id"])))
+        _recalc_batch_counts(db, int(row["batch_id"]))
         db.commit()
 
-        return {"row_id": str(row_id), "estado": "PENDIENTE"}
+        return {"row_id": row_id, "estado": "PENDIENTE"}
 
     except HTTPException:
         db.rollback()
@@ -1093,7 +1197,7 @@ def reintentar_row(
 
 @router.post("/row/{row_id}/ignorar")
 def ignorar_row(
-    row_id: UUID,
+    row_id: int,
     motivo: str = Form(...),
     usuario: str | None = Form(None),
     db: Session = Depends(get_db),
@@ -1104,7 +1208,7 @@ def ignorar_row(
     try:
         row = db.execute(
             text("SELECT id, batch_id FROM sesan_staging WHERE id = :id"),
-            {"id": str(row_id)},
+            {"id": row_id},
         ).mappings().first()
 
         if not row:
@@ -1121,13 +1225,13 @@ def ignorar_row(
                   updated_at = NOW()
                 WHERE id = :id
             """),
-            {"id": str(row_id), "motivo": motivo, "usuario": usuario},
+            {"id": row_id, "motivo": motivo, "usuario": usuario},
         )
 
-        _recalc_batch_counts(db, UUID(str(row["batch_id"])))
+        _recalc_batch_counts(db, int(row["batch_id"]))
         db.commit()
 
-        return {"row_id": str(row_id), "estado": "IGNORADO"}
+        return {"row_id": row_id, "estado": "IGNORADO"}
 
     except HTTPException:
         db.rollback()

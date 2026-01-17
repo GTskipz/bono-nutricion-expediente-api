@@ -1,6 +1,5 @@
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, List, Any, Dict
-from uuid import UUID
 from datetime import date, datetime
 from enum import Enum
 
@@ -54,29 +53,38 @@ class InfoGeneralIn(BaseModel):
 class ExpedienteCreate(BaseModel):
     nombre_beneficiario: Optional[str] = None
     cui_beneficiario: Optional[str] = None
+
+    # ✅ NUEVO: RUB (Registro Único de Beneficiario)
+    rub: Optional[str] = None
+
     departamento_id: Optional[int] = None
     municipio_id: Optional[int] = None
 
-    # ✅ NUEVO: requerido por NOT NULL en BD (expediente_electronico.anio_carga)
-    anio_carga:  Optional[int] = None
+    # ✅ NOT NULL en BD, pero lo dejamos opcional (backend hace fallback si no viene)
+    anio_carga: Optional[int] = None
 
-    # ✅ puedes dejarlo opcional si el flujo crea expediente primero y luego info_general
+    # ✅ puede quedar opcional si el flujo crea expediente primero y luego info_general
     info_general: Optional[InfoGeneralIn] = None
 
 
 class InfoGeneralOut(InfoGeneralIn):
-    id: UUID
-    expediente_id: UUID
+    id: int
+    expediente_id: int
 
     model_config = ConfigDict(from_attributes=True)
 
 
 class ExpedienteOut(BaseModel):
-    id: UUID
+    id: int
     created_at: datetime
     updated_at: datetime
+
     nombre_beneficiario: Optional[str] = None
     cui_beneficiario: Optional[str] = None
+
+    # ✅ NUEVO: RUB
+    rub: Optional[str] = None
+
     departamento_id: Optional[int] = None
     municipio_id: Optional[int] = None
     estado_expediente: str
@@ -115,11 +123,14 @@ class ExpedienteSearchRequest(BaseModel):
 
 
 class ExpedienteSearchItem(BaseModel):
-    id: UUID
+    id: int
     created_at: Optional[datetime] = None
 
     nombre_beneficiario: Optional[str] = None
     cui_beneficiario: Optional[str] = None
+
+    # ✅ Útil en bandeja/búsqueda si lo quieres mostrar o filtrar
+    rub: Optional[str] = None
 
     estado_expediente: Optional[str] = None
     bpm_status: Optional[str] = None

@@ -1,6 +1,5 @@
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, Literal
-from uuid import UUID
 from datetime import datetime
 
 
@@ -19,8 +18,8 @@ class TrackingCreate(BaseModel):
 
 
 class TrackingOut(BaseModel):
-    id: UUID
-    expediente_id: UUID
+    id: int
+    expediente_id: int
     created_at: datetime
 
     fecha_evento: datetime

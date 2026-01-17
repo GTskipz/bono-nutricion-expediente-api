@@ -1,15 +1,18 @@
+from __future__ import annotations
+from uuid import UUID
 from fastapi import (
     APIRouter,
     Depends,
     HTTPException,
     Query,
+    Response,
     UploadFile,
     File,
     Form,
 )
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_
-from uuid import UUID
+from sqlalchemy.exc import IntegrityError
 from datetime import datetime
 import hashlib
 
@@ -36,6 +39,10 @@ from app.models.cat_departamento import CatDepartamento
 from app.models.cat_municipio import CatMunicipio
 from app.models.cat_validacion import CatValidacion
 
+from fastapi.responses import FileResponse
+from app.services.documentos.carta_aceptacion import generar_carta_aceptacion_docx_bytes
+from app.utils.docx_to_pdf import docx_bytes_to_pdf_bytes
+
 router = APIRouter(prefix="/expedientes", tags=["Expedientes"])
 
 
@@ -47,7 +54,7 @@ MAX_MB = 15
 MAX_BYTES = MAX_MB * 1024 * 1024
 
 
-def build_placeholder_ftp_key(expediente_id: UUID, documento_id: UUID, filename: str) -> str:
+def build_placeholder_ftp_key(expediente_id: int, documento_id: int, filename: str) -> str:
     """
     storage_key: por ahora reservamos la "ruta" donde quedaría en FTP.
     Luego aquí se reemplaza por la llave/URL real devuelta por el uploader FTP.
@@ -81,24 +88,48 @@ def crear_expediente_core(payload: ExpedienteCreate, db: Session) -> ExpedienteE
 
     ✅ FIX MIS:
     - Si payload.anio_carga NO viene (o viene vacío), se usa el año actual (UTC).
-    - Esto evita error NOT NULL en expediente_electronico.anio_carga.
+    - Se incluye rub (Registro Único de Beneficiario) si viene en el payload.
+    - Regla: no repetir CUI por año y no repetir RUB por año (si viene).
     """
-    # ===============================
-    # Defaults seguros (NOT NULL)
-    # ===============================
     anio_carga = payload.anio_carga if getattr(payload, "anio_carga", None) else datetime.utcnow().year
-    mes_carga = getattr(payload, "mes_carga", None)
+    rub = getattr(payload, "rub", None)
+    cui = getattr(payload, "cui_beneficiario", None)
+
+    # ===============================
+    # Pre-validaciones de unicidad (antes del INSERT)
+    # ===============================
+    if cui:
+        exists_cui = (
+            db.query(ExpedienteElectronico.id)
+            .filter(
+                ExpedienteElectronico.cui_beneficiario == cui,
+                ExpedienteElectronico.anio_carga == anio_carga,
+            )
+            .first()
+        )
+        if exists_cui:
+            raise HTTPException(status_code=409, detail=f"Ya existe un expediente con ese CUI para el año {anio_carga}.")
+
+    if rub:
+        exists_rub = (
+            db.query(ExpedienteElectronico.id)
+            .filter(
+                ExpedienteElectronico.rub == rub,
+                ExpedienteElectronico.anio_carga == anio_carga,
+            )
+            .first()
+        )
+        if exists_rub:
+            raise HTTPException(status_code=409, detail=f"Ya existe un expediente con ese RUB para el año {anio_carga}.")
 
     # 1) crear expediente
     exp = ExpedienteElectronico(
+        rub=rub,
         nombre_beneficiario=payload.nombre_beneficiario,
-        cui_beneficiario=payload.cui_beneficiario,
+        cui_beneficiario=cui,
         departamento_id=payload.departamento_id,
         municipio_id=payload.municipio_id,
-
-        # ✅ CLAVE PARA NO FALLAR
         anio_carga=anio_carga,
-
         updated_at=datetime.utcnow(),
     )
     db.add(exp)
@@ -129,7 +160,19 @@ def crear_expediente_core(payload: ExpedienteCreate, db: Session) -> ExpedienteE
         ig = InfoGeneral(expediente_id=exp.id, **data_ig)
         db.add(ig)
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as ie:
+        db.rollback()
+        msg = str(ie).lower()
+        # cubre UNIQUE (cui_beneficiario, anio_carga) y UNIQUE (rub, anio_carga)
+        if "uq_expediente_cui_anio" in msg or ("cui_beneficiario" in msg and "anio_carga" in msg):
+            raise HTTPException(status_code=409, detail=f"Ya existe un expediente con ese CUI para el año {anio_carga}.")
+        if "uq_expediente_rub_anio" in msg or ("rub" in msg and "anio_carga" in msg):
+            raise HTTPException(status_code=409, detail=f"Ya existe un expediente con ese RUB para el año {anio_carga}.")
+        if "bpm_instance_id" in msg and "unique" in msg:
+            raise HTTPException(status_code=409, detail="bpm_instance_id ya existe en otro expediente")
+        raise HTTPException(status_code=500, detail=f"Error de integridad al crear expediente: {str(ie)}")
 
     # refrescar: trae docs_required_status (si el trigger lo setea en insert)
     db.refresh(exp)
@@ -150,30 +193,19 @@ def crear_expediente_core(payload: ExpedienteCreate, db: Session) -> ExpedienteE
 def crear_expediente(payload: ExpedienteCreate, db: Session = Depends(get_db)):
     """
     Endpoint público: crea expediente usando el CORE reutilizable.
-
-    ✅ Este endpoint debe usarse una vez se verificaron las validaciones/normalizaciones del dato.
     """
     try:
         return crear_expediente_core(payload, db)
-
     except HTTPException:
         db.rollback()
         raise
-
     except Exception as e:
         db.rollback()
-
-        msg = str(e).lower()
-
-        # conflicto por unique de bpm_instance_id (si lo estás usando)
-        if "unique" in msg and "bpm_instance_id" in msg:
-            raise HTTPException(status_code=409, detail="bpm_instance_id ya existe en otro expediente")
-
         raise HTTPException(status_code=500, detail=f"Error creando expediente: {str(e)}")
 
 
 @router.get("/{expediente_id}", response_model=ExpedienteOut)
-def obtener_expediente(expediente_id: UUID, db: Session = Depends(get_db)):
+def obtener_expediente(expediente_id: int, db: Session = Depends(get_db)):
     exp = (
         db.query(ExpedienteElectronico)
         .filter(ExpedienteElectronico.id == expediente_id)
@@ -215,23 +247,16 @@ def buscar_expedientes(payload: ExpedienteSearchRequest, db: Session = Depends(g
         if buscar_dpi:
             text_filters.append(ExpedienteElectronico.cui_beneficiario.like(f"{texto}%"))
 
-        # Si el cliente manda buscar_por vacío, NO se devuelve todo
         if not text_filters:
             return ExpedienteSearchResponse(data=[], page=payload.page, limit=payload.limit, total=0)
 
         filters.append(or_(*text_filters))
 
-    # ==========
-    # TOTAL (sin joins)
-    # ==========
     total_q = db.query(func.count(ExpedienteElectronico.id))
     if filters:
         total_q = total_q.filter(*filters)
     total = total_q.scalar() or 0
 
-    # ==========
-    # DATA (con joins para nombres de territorio)
-    # ==========
     offset = (payload.page - 1) * payload.limit
 
     q = (
@@ -286,16 +311,14 @@ def buscar_expedientes(payload: ExpedienteSearchRequest, db: Session = Depends(g
 @router.post("/bandeja", response_model=ExpedienteSearchResponse)
 def bandeja_asignados(payload: ExpedienteSearchRequest, db: Session = Depends(get_db)):
     """
-    Bandeja de casos asignados (temporal):
-    - Mientras no exista integración BPM/asignación real, usamos search con traer_todos=True.
-    - El frontend puede enviar paginación (page/limit).
+    Bandeja de casos asignados (temporal).
     """
     payload.traer_todos = True
     return buscar_expedientes(payload, db)
 
 
 @router.get("/{expediente_id}/detalle", response_model=ExpedienteOut)
-def obtener_expediente_detalle(expediente_id: UUID, db: Session = Depends(get_db)):
+def obtener_expediente_detalle(expediente_id: int, db: Session = Depends(get_db)):
     row = (
         db.query(
             ExpedienteElectronico,
@@ -313,15 +336,12 @@ def obtener_expediente_detalle(expediente_id: UUID, db: Session = Depends(get_db
 
     exp, departamento, municipio = row
 
-    # Info general 1:1
     ig = db.query(InfoGeneral).filter(InfoGeneral.expediente_id == exp.id).first()
     exp.info_general = ig
 
-    # campos “virtuales”
     exp.departamento = departamento
     exp.municipio = municipio
 
-    # ✅ NUEVO: estado simple para UI (sin depender del formato JSON exacto)
     docs = getattr(exp, "docs_required_status", None)
     exp.docs_required_state = "COMPLETO" if isinstance(docs, dict) and docs.get("completo") is True else "PENDIENTE"
 
@@ -330,7 +350,7 @@ def obtener_expediente_detalle(expediente_id: UUID, db: Session = Depends(get_db
 
 @router.get("/{expediente_id}/documentos")
 def listar_documentos_expediente(
-    expediente_id: UUID,
+    expediente_id: int,
     tab: str = Query("DOCUMENTOS", description="DOCUMENTOS | ANEXOS"),
     db: Session = Depends(get_db),
 ):
@@ -379,14 +399,13 @@ def listar_documentos_expediente(
 
 @router.post("/{expediente_id}/documentos/{documento_id}/upload")
 async def upload_documento_por_id(
-    expediente_id: UUID,
-    documento_id: UUID,
+    expediente_id: int,
+    documento_id: int,
     file: UploadFile = File(...),
     observacion: str | None = Form(None),
     descripcion: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
-    # Validar expediente existe
     exp_exists = (
         db.query(ExpedienteElectronico.id)
         .filter(ExpedienteElectronico.id == expediente_id)
@@ -420,10 +439,8 @@ async def upload_documento_por_id(
     mime = file.content_type or "application/octet-stream"
     checksum = hashlib.sha256(content).hexdigest()
 
-    # HOOK FTP (NO IMPLEMENTADO)
     ftp_key = build_placeholder_ftp_key(expediente_id, documento_id, file.filename)
 
-    # Actualizar
     doc.estado = "ADJUNTADO"
     doc.filename = file.filename
     doc.mime_type = mime
@@ -441,8 +458,8 @@ async def upload_documento_por_id(
 
     return {
         "ok": True,
-        "id": str(doc.id),
-        "expediente_id": str(doc.expediente_id),
+        "id": doc.id,
+        "expediente_id": doc.expediente_id,
         "tab": doc.tab,
         "tipo_documento_id": doc.tipo_documento_id,
         "estado": doc.estado,
@@ -462,7 +479,7 @@ async def upload_documento_por_id(
 
 @router.post("/{expediente_id}/documentos/upload")
 async def upload_documento_por_tipo(
-    expediente_id: UUID,
+    expediente_id: int,
     file: UploadFile = File(...),
     tab: str = Form("DOCUMENTOS"),
     tipo_documento_id: int = Form(...),
@@ -470,7 +487,6 @@ async def upload_documento_por_tipo(
     descripcion: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
-    # Validar expediente existe
     exp_exists = (
         db.query(ExpedienteElectronico.id)
         .filter(ExpedienteElectronico.id == expediente_id)
@@ -481,7 +497,6 @@ async def upload_documento_por_tipo(
 
     tab = validar_tab(tab)
 
-    # Validar que el tipo_documento exista
     tipo = db.query(CatTipoDocumento).filter(CatTipoDocumento.id == tipo_documento_id).first()
     if not tipo:
         raise HTTPException(status_code=400, detail="tipo_documento_id inválido (no existe en catálogo)")
@@ -500,7 +515,6 @@ async def upload_documento_por_tipo(
     mime = file.content_type or "application/octet-stream"
     checksum = hashlib.sha256(content).hexdigest()
 
-    # 1) Buscar registro existente por llave única
     doc = (
         db.query(DocumentosYAnexos)
         .filter(DocumentosYAnexos.expediente_id == expediente_id)
@@ -509,7 +523,6 @@ async def upload_documento_por_tipo(
         .first()
     )
 
-    # 2) Si NO existe, crearlo (fallback)
     if not doc:
         doc = DocumentosYAnexos(
             expediente_id=expediente_id,
@@ -522,10 +535,8 @@ async def upload_documento_por_tipo(
         db.add(doc)
         db.flush()
 
-    # 3) HOOK FTP (NO IMPLEMENTADO)
     ftp_key = build_placeholder_ftp_key(expediente_id, doc.id, file.filename)
 
-    # 4) Adjuntar metadatos
     doc.estado = "ADJUNTADO"
     doc.filename = file.filename
     doc.mime_type = mime
@@ -543,8 +554,8 @@ async def upload_documento_por_tipo(
 
     return {
         "ok": True,
-        "id": str(doc.id),
-        "expediente_id": str(doc.expediente_id),
+        "id": doc.id,
+        "expediente_id": doc.expediente_id,
         "tab": doc.tab,
         "tipo_documento_id": doc.tipo_documento_id,
         "estado": doc.estado,
@@ -568,11 +579,10 @@ async def upload_documento_por_tipo(
     status_code=201
 )
 def crear_tracking_evento(
-    expediente_id: UUID,
+    expediente_id: int,
     payload: TrackingCreate,
     db: Session = Depends(get_db),
 ):
-    # validar expediente
     exists = (
         db.query(ExpedienteElectronico.id)
         .filter(ExpedienteElectronico.id == expediente_id)
@@ -602,10 +612,9 @@ def crear_tracking_evento(
     response_model=list[TrackingOut]
 )
 def listar_tracking_expediente(
-    expediente_id: UUID,
+    expediente_id: int,
     db: Session = Depends(get_db),
 ):
-    # validar expediente
     exists = (
         db.query(ExpedienteElectronico.id)
         .filter(ExpedienteElectronico.id == expediente_id)
@@ -625,3 +634,30 @@ def listar_tracking_expediente(
     )
 
     return eventos
+
+@router.get("/{expediente_id}/documentos/carta-aceptacion.docx")
+def descargar_carta_docx(expediente_id: int, db: Session = Depends(get_db)):
+    try:
+        content, filename = generar_carta_aceptacion_docx_bytes(expediente_id, db)
+        return Response(
+            content=content,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@router.get("/{expediente_id}/documentos/carta-aceptacion.pdf")
+def descargar_carta_pdf(expediente_id: int, db: Session = Depends(get_db)):
+    try:
+        docx_bytes, docx_name = generar_carta_aceptacion_docx_bytes(expediente_id, db)
+        pdf_bytes = docx_bytes_to_pdf_bytes(docx_bytes)
+        pdf_name = docx_name.replace(".docx", ".pdf")
+
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{pdf_name}"'},
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
