@@ -46,9 +46,14 @@ PUBLIC_PATHS = {
 
 @app.middleware("http")
 async def require_bearer_token_middleware(request: Request, call_next):
+    # ✅ Permitir preflight CORS (OPTIONS) sin auth
+    # El navegador hace OPTIONS antes del GET/POST real y NO envía Authorization.
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
     path = request.url.path
 
-    # ✅ Permitir rutas públicas + docs + endpoints BPM de prueba
+    # ✅ Permitir rutas públicas + docs + endpoints BPM
     if (
         path in PUBLIC_PATHS
         or path.startswith("/docs")
@@ -73,6 +78,20 @@ async def require_bearer_token_middleware(request: Request, call_next):
     return await call_next(request)
 
 # =====================================================
+# CORS (DEV: permitir cualquiera)
+# =====================================================
+# ✅ Para DEV, permitir cualquier origen.
+# ⚠️ Con allow_origins=["*"] NO se puede usar allow_credentials=True.
+# Bearer Token via Authorization funciona perfecto con allow_credentials=False.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# =====================================================
 # Routers
 # =====================================================
 app.include_router(catalogos_router)
@@ -80,23 +99,6 @@ app.include_router(expedientes_router)
 app.include_router(sesan_router)
 app.include_router(reportes_router)
 app.include_router(bpm_router)
-
-# =====================================================
-# CORS
-# =====================================================
-origins = [
-    "http://localhost:5174",
-    "http://127.0.0.1:5174",
-    "https://frontend.mis.com"
-]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # =====================================================
 # Endpoints base
