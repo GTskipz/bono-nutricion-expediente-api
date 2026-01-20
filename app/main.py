@@ -1,8 +1,19 @@
+from dotenv import load_dotenv
+from pathlib import Path
+
+# =====================================================
+# Cargar variables de entorno (.env)
+# =====================================================
+# main.py está en /app
+# .env está en la raíz del proyecto
+env_path = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(dotenv_path=env_path)
+
 from fastapi import FastAPI, Depends, Request
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.db import get_db
 from app.core.auth import parse_authorization_header
@@ -10,24 +21,45 @@ from app.core.auth import parse_authorization_header
 from app.routers.catalogos import router as catalogos_router
 from app.routers.expedientes import router as expedientes_router
 from app.routers.sesan import router as sesan_router
+from app.routers.reportes import router as reportes_router
+from app.routers.bpm_router import router as bpm_router
 
+# =====================================================
+# App
+# =====================================================
 app = FastAPI(title="MIS - Expediente API")
 
-# ✅ Middleware: exigir token en todo excepto rutas públicas
+# =====================================================
+# Middleware de Autenticación
+# =====================================================
 PUBLIC_PATHS = {
+    "/",
     "/health",
     "/db-check",
     "/openapi.json",
     "/docs",
     "/redoc",
+
+    # ✅ BPM (solo pruebas)
+    "/bpm/auth/token",
 }
 
 @app.middleware("http")
 async def require_bearer_token_middleware(request: Request, call_next):
+    # ✅ Permitir preflight CORS (OPTIONS) sin auth
+    # El navegador hace OPTIONS antes del GET/POST real y NO envía Authorization.
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
     path = request.url.path
 
-    # permitir docs y endpoints públicos
-    if path in PUBLIC_PATHS or path.startswith("/docs") or path.startswith("/redoc"):
+    # ✅ Permitir rutas públicas + docs + endpoints BPM
+    if (
+        path in PUBLIC_PATHS
+        or path.startswith("/docs")
+        or path.startswith("/redoc")
+        or path.startswith("/bpm")  # ✅ /bpm/tasks/by-row/{row_id}
+    ):
         return await call_next(request)
 
     auth = request.headers.get("Authorization")
@@ -40,28 +72,40 @@ async def require_bearer_token_middleware(request: Request, call_next):
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # ✅ opcional: guardar token para reusarlo luego (Spiff / Keycloak)
+    # Guardar token para uso posterior (Spiff / BPM)
     request.state.token = token
 
     return await call_next(request)
 
-# Routers
-app.include_router(catalogos_router)
-app.include_router(expedientes_router)
-app.include_router(sesan_router)
-
-origins = [
-    "http://localhost:5174",
-    "http://127.0.0.1:5174",
-]
-
+# =====================================================
+# CORS (DEV: permitir cualquiera)
+# =====================================================
+# ✅ Para DEV, permitir cualquier origen.
+# ⚠️ Con allow_origins=["*"] NO se puede usar allow_credentials=True.
+# Bearer Token via Authorization funciona perfecto con allow_credentials=False.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# =====================================================
+# Routers
+# =====================================================
+app.include_router(catalogos_router)
+app.include_router(expedientes_router)
+app.include_router(sesan_router)
+app.include_router(reportes_router)
+app.include_router(bpm_router)
+
+# =====================================================
+# Endpoints base
+# =====================================================
+@app.get("/")
+def root():
+    return {"service": "MIS - Expediente API"}
 
 @app.get("/health")
 def health():
