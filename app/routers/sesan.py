@@ -61,20 +61,25 @@ def listar_filas_batch(
 
 
 @router.post("/batch/{batch_id}/procesar-pendientes")
-def procesar_pendientes_batch(
+async def procesar_pendientes_batch(  # ✅ async
     batch_id: int,
     limit: int = Query(200, ge=1, le=2000),
     db: Session = Depends(get_db),
 ):
-    return SesanService(db).procesar_pendientes_batch(batch_id=batch_id, limit=limit)
+    return await SesanService(db).procesar_pendientes_batch(  # ✅ await
+        batch_id=batch_id,
+        limit=limit
+    )
 
 
 @router.post("/row/{row_id}/procesar")
-def procesar_row(
+async def procesar_row(  # ✅ async
     row_id: int,
     db: Session = Depends(get_db),
 ):
-    return SesanService(db).procesar_row(row_id=row_id)
+    return await SesanService(db).procesar_row(  # ✅ await
+        row_id=row_id
+    )
 
 
 @router.post("/batch/{batch_id}/reintentar-errores")

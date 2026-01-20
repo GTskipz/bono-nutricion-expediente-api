@@ -17,7 +17,7 @@ from app.routers.expedientes import crear_expediente_core
 from app.schemas.expediente import ExpedienteCreate, InfoGeneralIn
 
 from app.bpm.bpm_client import BpmClient
-from app.bpm.bpm_payload_builder import build_bpm_payload_from_staging_row
+from app.bpm.bpm_payload_builder import build_spiff_payload_from_staging_row
 
 
 class SesanService:
@@ -280,13 +280,15 @@ class SesanService:
     # =====================================================
     # ✅ Procesar 1 fila (BPM decide → si aprueba crea expediente)
     # =====================================================
-    def _procesar_row_creando_expediente(self, row_id: int):
+    async def _procesar_row_creando_expediente(self, row_id: int):
+        print(f"[SESAN] ▶️ Iniciando procesamiento row_id={row_id}")
+
         row = self.db.execute(
             text("""
                 SELECT
-                  s.*,
-                  b.anio_carga,
-                  b.mes_carga
+                s.*,
+                b.anio_carga,
+                b.mes_carga
                 FROM sesan_staging s
                 JOIN sesan_batch b ON b.id = s.batch_id
                 WHERE s.id = :id
@@ -296,13 +298,22 @@ class SesanService:
         ).mappings().first()
 
         if not row:
+            print(f"[SESAN][ERROR] ❌ Row {row_id} no encontrada")
             raise HTTPException(status_code=404, detail="Fila staging no encontrada.")
 
+        print(f"[SESAN] Estado actual={row.get('estado')} batch_id={row.get('batch_id')}")
+
         if row["estado"] == "IGNORADO":
+            print(f"[SESAN] ⚠️ Row {row_id} está IGNORADA")
             raise HTTPException(status_code=409, detail="La fila está IGNORADA.")
 
         if row["estado"] == "PROCESADO" and row.get("expediente_id"):
-            return {"row_id": row_id, "estado": "PROCESADO", "expediente_id": int(row["expediente_id"])}
+            print(f"[SESAN] ✅ Row {row_id} ya procesada expediente_id={row.get('expediente_id')}")
+            return {
+                "row_id": row_id,
+                "estado": "PROCESADO",
+                "expediente_id": int(row["expediente_id"])
+            }
 
         anio_carga = int(row["anio_carga"])
         mes_carga = int(row["mes_carga"]) if row.get("mes_carga") is not None else None
@@ -311,52 +322,108 @@ class SesanService:
         cui = to_cui(row.get("cui_nino"))
         nombre = norm_str(row.get("nombre_nino"))
 
+        print(
+            f"[SESAN] Datos básicos -> "
+            f"año={anio_carga} mes={mes_carga} rub={rub} cui={cui} nombre={nombre}"
+        )
+
         if not cui:
+            print(f"[SESAN][ERROR] ❌ CUI vacío row_id={row_id}")
             raise ValueError("MISSING_CUI|CUI del niño vacío.")
+
         if not nombre:
+            print(f"[SESAN][ERROR] ❌ Nombre vacío row_id={row_id}")
             raise ValueError("MISSING_NAME|Nombre del niño vacío.")
 
         if self._is_dup_cui_in_year(cui, anio_carga, row_id):
+            print(f"[SESAN][ERROR] ❌ CUI duplicado en staging año={anio_carga}")
             raise ValueError(f"DUP_CUI_YEAR|CUI duplicado en el año de carga {anio_carga} (staging).")
+
         if self._is_dup_cui_in_expedientes(cui, anio_carga):
+            print(f"[SESAN][ERROR] ❌ CUI duplicado en expedientes año={anio_carga}")
             raise ValueError(f"DUP_CUI_YEAR|CUI duplicado en el año de carga {anio_carga} (expedientes).")
 
-        if rub is not None and rub != "":
+        if rub:
             if self._is_dup_rub_in_year(rub, anio_carga, row_id):
+                print(f"[SESAN][ERROR] ❌ RUB duplicado en staging año={anio_carga}")
                 raise ValueError(f"DUP_RUB_YEAR|RUB duplicado en el año de carga {anio_carga} (staging).")
+
             if self._is_dup_rub_in_expedientes(rub, anio_carga):
+                print(f"[SESAN][ERROR] ❌ RUB duplicado en expedientes año={anio_carga}")
                 raise ValueError(f"DUP_RUB_YEAR|RUB duplicado en el año de carga {anio_carga} (expedientes).")
 
         # =====================================================
-        # ✅ BPM decide (stub si BPM_ENABLED=false)
+        # ✅ BPM decide
         # =====================================================
         try:
-            payload_bpm = build_bpm_payload_from_staging_row(
-                row=row,
-                anio_carga=anio_carga,
-                mes_carga=mes_carga,
-                renap_validado=True,
-                verificacion_sobrevivencia=True,
-                familia_cumple_validaciones=True,
+            print(f"[SESAN][BPM] ▶️ Construyendo payload BPM row_id={row_id}")
+            payload_spiff = build_spiff_payload_from_staging_row(row=row)
+
+            print(f"[SESAN][BPM] Payload enviado:\n{payload_spiff}")
+
+            # Guardar request BPM (si existe columna)
+            self._set_row_bpm_request(row_id=row_id, bpm_req=payload_spiff)
+
+            print(f"[SESAN][BPM] ▶️ Enviando a Spiff (message registrar_nutricion)")
+            bpm_eval = await self.bpm.evaluate_run_and_get_decision(payload_spiff)
+
+            print(
+                f"[SESAN][BPM] Respuesta -> "
+                f"instance_id={bpm_eval.bpm_instance_id} "
+                f"status={bpm_eval.status} "
+                f"milestone={bpm_eval.last_milestone_bpmn_name} "
+                f"should_create={bpm_eval.should_create_expediente}"
             )
-            bpm_res = self.bpm.evaluate_expediente(payload_bpm)  # dict
+
+            # Guardar respuesta BPM (si existe columna)
+            self._set_row_bpm_result(
+                row_id=row_id,
+                bpm_status=bpm_eval.status,
+                bpm_res=bpm_eval.raw_status,
+                bpm_instance_id=str(bpm_eval.bpm_instance_id),
+            )
+
+            if not bpm_eval.should_create_expediente:
+                print(f"[SESAN][BPM] ❌ NO permitido crear expediente (DPI no encontrado)")
+                # ✅ CORREGIDO: firma real (code, msg)
+                self._set_row_error(
+                    row_id,
+                    "DPI_NO_ENCONTRADO",
+                    "No se pudo validar el DPI del niño en los registros oficiales."
+                )
+                return {
+                    "row_id": row_id,
+                    "estado": "ERROR",
+                    "codigo": "DPI_NO_ENCONTRADO"
+                }
+
         except Exception as e:
+            print(f"[SESAN][BPM][ERROR] ❌ {str(e)}")
+            # ✅ CORREGIDO: firma real (code, msg)
+            self._set_row_error(
+                row_id,
+                "BPM_ERROR",
+                str(e)
+            )
             raise ValueError(f"BPM_ERROR|{str(e)}")
 
-        if (bpm_res.get("resultado_elegibilidad") or "").upper() != "APROBADO":
-            msg = bpm_res.get("observaciones") or "No aprobado por BPM."
-            raise ValueError(f"BPM_RECHAZADO|{msg}")
-
         # =====================================================
-        # ✅ Si BPM aprueba: crear expediente como siempre
+        # ✅ Crear expediente
         # =====================================================
+        print(f"[SESAN] ▶️ Creando expediente electrónico row_id={row_id}")
         payload = self._build_expediente_payload_from_row(row, anio_carga, mes_carga)
         exp = crear_expediente_core(payload, self.db)
 
         self._set_row_processed(row_id, int(exp.id))
         self._recalc_batch_counts(int(row["batch_id"]))
 
-        return {"row_id": row_id, "estado": "PROCESADO", "expediente_id": int(exp.id)}
+        print(f"[SESAN] ✅ Expediente creado id={exp.id} row_id={row_id}")
+
+        return {
+            "row_id": row_id,
+            "estado": "PROCESADO",
+            "expediente_id": int(exp.id)
+        }
 
     # =====================================================
     # 1) Crear batch + staging (SUBIDA)
@@ -623,7 +690,7 @@ class SesanService:
     # =====================================================
     # 4) Procesar pendientes batch
     # =====================================================
-    def procesar_pendientes_batch(self, *, batch_id: int, limit: int):
+    async def procesar_pendientes_batch(self, *, batch_id: int, limit: int):
         try:
             batch = self.db.execute(
                 text("SELECT id, anio_carga FROM sesan_batch WHERE id = :id"),
@@ -651,7 +718,7 @@ class SesanService:
             for r in rows:
                 rid = int(r["id"])
                 try:
-                    self._procesar_row_creando_expediente(rid)
+                    await self._procesar_row_creando_expediente(rid)
                     procesados += 1
                 except ValueError as ve:
                     raw = str(ve)
@@ -688,9 +755,9 @@ class SesanService:
     # =====================================================
     # 5) Procesar fila individual
     # =====================================================
-    def procesar_row(self, *, row_id: int):
+    async def procesar_row(self, *, row_id: int):
         try:
-            result = self._procesar_row_creando_expediente(row_id)
+            result = await self._procesar_row_creando_expediente(row_id)
             self.db.commit()
             return result
 
@@ -854,3 +921,51 @@ class SesanService:
         except Exception as e:
             self.db.rollback()
             raise HTTPException(status_code=500, detail=f"Error ignorando fila: {str(e)}")
+
+    # =====================================================
+    # BPM persistence helpers
+    # =====================================================
+    def _set_row_bpm_result(self, row_id: int, bpm_status: str, bpm_res: dict, bpm_instance_id: str | None = None):
+        """
+        Si las columnas aún no existen (esquema viejo), no revienta.
+        """
+        try:
+            self.db.execute(
+                text("""
+                    UPDATE sesan_staging
+                    SET
+                      bpm_status = :bpm_status,
+                      bpm_instance_id = :bpm_instance_id,
+                      bpm_response_json = :bpm_response_json
+                    WHERE id = :id
+                """),
+                {
+                    "id": row_id,
+                    "bpm_status": bpm_status,
+                    "bpm_instance_id": bpm_instance_id,
+                    "bpm_response_json": json.dumps(bpm_res, ensure_ascii=False),
+                },
+            )
+        except Exception as e:
+            # No cambiamos lógica: solo evitamos que falle por columnas faltantes
+            print(f"[SESAN][BPM][WARN] No se pudo guardar bpm_result (¿faltan columnas?): {e}")
+
+    def _set_row_bpm_request(self, row_id: int, bpm_req: dict):
+        """
+        Si la columna bpm_request_json aún no existe, no revienta.
+        """
+        try:
+            self.db.execute(
+                text("""
+                    UPDATE sesan_staging
+                    SET
+                      bpm_request_json = :bpm_request_json
+                    WHERE id = :id
+                """),
+                {
+                    "id": row_id,
+                    "bpm_request_json": json.dumps(bpm_req, ensure_ascii=False),
+                },
+            )
+        except Exception as e:
+            print(f"[SESAN][BPM][WARN] No se pudo guardar bpm_request (¿falta bpm_request_json?): {e}")
