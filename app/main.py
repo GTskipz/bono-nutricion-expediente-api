@@ -24,6 +24,9 @@ from app.routers.sesan import router as sesan_router
 from app.routers.reportes import router as reportes_router
 from app.routers.bpm_router import router as bpm_router
 
+# 1. Importar el nuevo router de Archivos (MinIO)
+from app.routers.archivos import router as archivos_router
+
 # =====================================================
 # App
 # =====================================================
@@ -39,26 +42,29 @@ PUBLIC_PATHS = {
     "/openapi.json",
     "/docs",
     "/redoc",
-
-    # ✅ BPM (solo pruebas)
+    # BPM (solo pruebas)
     "/bpm/auth/token",
+    
+    # Opcional: Si quieres probar la subida SIN token al inicio, descomenta esta línea:
+    "/archivos/generar-url-subida"
 }
 
 @app.middleware("http")
 async def require_bearer_token_middleware(request: Request, call_next):
-    # ✅ Permitir preflight CORS (OPTIONS) sin auth
-    # El navegador hace OPTIONS antes del GET/POST real y NO envía Authorization.
+    # Permitir preflight CORS (OPTIONS) sin auth
     if request.method == "OPTIONS":
         return await call_next(request)
 
     path = request.url.path
 
-    # ✅ Permitir rutas públicas + docs + endpoints BPM
+    # Permitir rutas públicas + docs + endpoints BPM
     if (
         path in PUBLIC_PATHS
         or path.startswith("/docs")
         or path.startswith("/redoc")
-        or path.startswith("/bpm")  # ✅ /bpm/tasks/by-row/{row_id}
+        or path.startswith("/bpm")   # ✅ /bpm/tasks/by-row/{row_id}
+        or path.startswith("/sesan")
+        or path.startswith("/archivos/descargar")
     ):
         return await call_next(request)
 
@@ -78,15 +84,20 @@ async def require_bearer_token_middleware(request: Request, call_next):
     return await call_next(request)
 
 # =====================================================
-# CORS (DEV: permitir cualquiera)
+# CORS (Configuración Profesional)
 # =====================================================
-# ✅ Para DEV, permitir cualquier origen.
-# ⚠️ Con allow_origins=["*"] NO se puede usar allow_credentials=True.
-# Bearer Token via Authorization funciona perfecto con allow_credentials=False.
+origins = [
+    "http://localhost:5174",    # Tu Frontend React (Vite)
+    "http://localhost:3000",    # Por si usas otro puerto a veces
+    "http://127.0.0.1:5174",    # Variante de localhost
+    # Aquí se agregara la IP/Dominio del MIDES cuando se haga el despliegue
+    "http://145.32.10.230",      
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=origins,      # <--- Solo permitimos a los "amigos" de la lista
+    allow_credentials=True,     # <--- ¡VITAL! Permite pasar el Token Bearer y Cookies
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -99,6 +110,8 @@ app.include_router(expedientes_router)
 app.include_router(sesan_router)
 app.include_router(reportes_router)
 app.include_router(bpm_router)
+#Registrar el router de Archivos (MinIO)
+app.include_router(archivos_router)
 
 # =====================================================
 # Endpoints base

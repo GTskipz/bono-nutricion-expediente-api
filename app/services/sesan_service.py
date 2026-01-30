@@ -1,6 +1,8 @@
 # app/services/sesan_service.py
 from __future__ import annotations
 
+import os   # Agregado para variables de entorno
+import io   # Agregado para manejo de streams de bytes
 from fastapi import HTTPException, UploadFile
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -18,6 +20,13 @@ from app.schemas.expediente import ExpedienteCreate, InfoGeneralIn
 
 from app.bpm.bpm_client import BpmClient
 from app.bpm.bpm_payload_builder import build_spiff_payload_from_staging_row
+
+# IMPORTAMOS EL CLIENTE MINIO (Agregado)
+try:
+    from app.dependencies import minio_client
+except ImportError:
+    minio_client = None
+    print("Advertencia: app.dependencies.minio_client no encontrado.")
 
 
 class SesanService:
@@ -449,8 +458,29 @@ class SesanService:
 
             ts = datetime.utcnow().strftime("%Y%m%d%H%M%S")
             safe_name = (file.filename or "sesan.xlsx").replace("\\", "_").replace("/", "_")
-            storage_provider = "ftp"
-            storage_key = f"ftp://PENDIENTE/sesan/{ts}_{safe_name}"
+            
+            # INICIO CAMBIO A MINIO (Mantiene lógica original, agrega MinIO)
+            bucket_name = os.getenv("MINIO_BUCKET", "almacenamiento-mis")
+            # Estructura: sesan/2026/20260127120000_archivo.xlsx
+            object_name = f"sesan/{anio_carga}/{ts}_{safe_name}"
+
+            if minio_client:
+                # Subir el archivo real a MinIO
+                minio_client.put_object(
+                    bucket_name,
+                    object_name,
+                    io.BytesIO(file_bytes),
+                    size_bytes,
+                    content_type=file.content_type
+                )
+                storage_provider = "MINIO"
+                storage_key = object_name 
+            else:
+                # Fallback original por si acaso falla la importación
+                print("Cliente MinIO no disponible, usando FTP simulado")
+                storage_provider = "ftp"
+                storage_key = f"ftp://PENDIENTE/sesan/{ts}_{safe_name}"
+            # FIN CAMBIO MINIO
 
             batch_id = self.db.execute(
                 text("""
