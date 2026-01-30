@@ -4,6 +4,13 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import hashlib
+### [CAMBIO INTEGRACION MINIO] Imports necesarios para manejo de streams y sistema operativo
+import io
+import os
+# Importamos el cliente de MinIO configurado en el proyecto
+from app.core.minio import minio_client 
+### --------------------------------------------------------------------------
+
 from fastapi import HTTPException
 from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
@@ -352,15 +359,50 @@ def upload_documento_por_id_core(
     mime = content_type or "application/octet-stream"
     checksum = hashlib.sha256(content).hexdigest()
 
-    ftp_key = build_placeholder_ftp_key(expediente_id, documento_id, filename)
+    # --- [CAMBIO INTEGRACION MINIO] Inicio de lógica de carga real ---
+    # Antes se usaba: ftp_key = build_placeholder_ftp_key(expediente_id, documento_id, filename)
+    # Ahora subimos a MinIO:
 
-    doc.estado = "ADJUNTADO"
+    try:
+        bucket_name = os.getenv("MINIO_BUCKET", "almacenamiento-mis")
+        
+        # Sanitizar nombre de archivo y construir ruta lógica
+        safe_filename = filename.replace(" ", "_")
+        # Ruta: expedientes/{id}/{tab}/reemplazos/{filename}
+        # Nota: Usamos 'reemplazos' o directo el ID si prefieres mantener historial, 
+        # aquí mantenemos la estructura simple.
+        storage_key = f"expedientes/{expediente_id}/{doc.tab.lower()}/upd_{doc.id}_{safe_filename}"
+        
+        if not minio_client:
+             raise HTTPException(status_code=500, detail="Servicio de almacenamiento no disponible")
+
+        # Preparar stream
+        data_stream = io.BytesIO(content)
+        
+        # Subir a MinIO
+        minio_client.put_object(
+            bucket_name,
+            storage_key,
+            data_stream,
+            length=size,
+            content_type=mime
+        )
+        
+        # Asignar valores reales para la BD
+        doc.storage_provider = "MINIO"
+        doc.storage_key = storage_key
+        doc.estado = "ADJUNTADO"
+
+    except Exception as e:
+        print(f"Error subiendo documento por ID a MinIO: {e}")
+        raise HTTPException(status_code=500, detail="Error guardando el archivo físico en el servidor.")
+    
+    # --- [CAMBIO INTEGRACION MINIO] Fin de lógica de carga ---
+
     doc.filename = filename
     doc.mime_type = mime
     doc.size_bytes = size
     doc.checksum_sha256 = checksum
-    doc.storage_provider = "FTP"
-    doc.storage_key = ftp_key
     doc.subido_por = "pendiente"
     doc.observacion = observacion
     doc.descripcion = descripcion
@@ -432,15 +474,50 @@ def upload_documento_por_tipo_core(
         db.add(doc)
         db.flush()
 
-    ftp_key = build_placeholder_ftp_key(expediente_id, doc.id, filename)
+    # --- [CAMBIO INTEGRACION MINIO] Inicio de lógica de carga real ---
+    # Antes se usaba: ftp_key = build_placeholder_ftp_key(...)
+    # Ahora subimos a MinIO:
 
-    doc.estado = "ADJUNTADO"
+    try:
+        bucket_name = os.getenv("MINIO_BUCKET", "almacenamiento-mis")
+        
+        # Construcción de ruta lógica: expedientes/{id}/{tab}/{codigo_tipo}_{filename}
+        safe_filename = filename.replace(" ", "_")
+        # Usamos el código del tipo de documento para orden (ej: DPI_MADRE_foto.jpg)
+        codigo_prefix = tipo.codigo if tipo.codigo else f"T{tipo_documento_id}"
+        storage_key = f"expedientes/{expediente_id}/{tab.lower()}/{codigo_prefix}_{safe_filename}"
+        
+        if not minio_client:
+             raise HTTPException(status_code=500, detail="Servicio de almacenamiento no disponible")
+
+        # Preparar stream de bytes
+        data_stream = io.BytesIO(content)
+        
+        # Ejecutar subida (put_object)
+        minio_client.put_object(
+            bucket_name,
+            storage_key,
+            data_stream,
+            length=size,
+            content_type=mime
+        )
+        
+        # Asignar punteros reales a la BD
+        doc.storage_provider = "MINIO"
+        doc.storage_key = storage_key
+        doc.estado = "ADJUNTADO"
+
+    except Exception as e:
+        print(f"Error subiendo documento por TIPO a MinIO: {e}")
+        # En caso de fallo crítico de IO, reportamos error 500
+        raise HTTPException(status_code=500, detail="Error guardando el archivo físico en el servidor.")
+
+    # --- [CAMBIO INTEGRACION MINIO] Fin de lógica de carga ---
+
     doc.filename = filename
     doc.mime_type = mime
     doc.size_bytes = size
     doc.checksum_sha256 = checksum
-    doc.storage_provider = "FTP"
-    doc.storage_key = ftp_key
     doc.subido_por = "pendiente"
     doc.observacion = observacion
     doc.descripcion = descripcion
