@@ -12,7 +12,7 @@ from app.core.minio import minio_client
 ### --------------------------------------------------------------------------
 
 from fastapi import HTTPException
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -25,6 +25,7 @@ from app.models.cat_tipo_documento import CatTipoDocumento
 from app.models.cat_departamento import CatDepartamento
 from app.models.cat_municipio import CatMunicipio
 from app.models.cat_validacion import CatValidacion
+from app.models.cat_estado_flujo_expediente import CatEstadoFlujoExpediente
 
 from app.schemas.expediente import (
     ExpedienteCreate,
@@ -39,6 +40,9 @@ from app.schemas.tracking_evento import TrackingCreate
 # =====================================================
 # Helpers (Upload)
 # =====================================================
+
+ESTADO_FLUJO_TITULAR_CARGADO = "TITULAR_CARGADO"
+ESTADO_FLUJO_DOCS_CARGADOS = "DOCS_CARGADOS"
 
 MAX_MB = 15
 MAX_BYTES = MAX_MB * 1024 * 1024
@@ -75,7 +79,27 @@ def crear_expediente_core(payload: ExpedienteCreate, db: Session) -> ExpedienteE
     rub = getattr(payload, "rub", None)
     cui = getattr(payload, "cui_beneficiario", None)
 
+    # =====================================================
+    # Obtener estado de flujo inicial (ACTIVO)
+    # =====================================================
+    estado_activo = (
+        db.query(CatEstadoFlujoExpediente)
+        .filter(
+            CatEstadoFlujoExpediente.codigo == "INICIO",
+            CatEstadoFlujoExpediente.activo.is_(True),
+        )
+        .first()
+    )
+
+    if not estado_activo:
+        raise HTTPException(
+            status_code=500,
+            detail="No existe el estado de flujo inicial (codigo=ACTIVO)."
+        )
+
+    # =====================================================
     # Pre-validaciones de unicidad
+    # =====================================================
     if cui:
         exists_cui = (
             db.query(ExpedienteElectronico.id)
@@ -86,7 +110,10 @@ def crear_expediente_core(payload: ExpedienteCreate, db: Session) -> ExpedienteE
             .first()
         )
         if exists_cui:
-            raise HTTPException(status_code=409, detail=f"Ya existe un expediente con ese CUI para el año {anio_carga}.")
+            raise HTTPException(
+                status_code=409,
+                detail=f"Ya existe un expediente con ese CUI para el año {anio_carga}."
+            )
 
     if rub:
         exists_rub = (
@@ -98,8 +125,14 @@ def crear_expediente_core(payload: ExpedienteCreate, db: Session) -> ExpedienteE
             .first()
         )
         if exists_rub:
-            raise HTTPException(status_code=409, detail=f"Ya existe un expediente con ese RUB para el año {anio_carga}.")
+            raise HTTPException(
+                status_code=409,
+                detail=f"Ya existe un expediente con ese RUB para el año {anio_carga}."
+            )
 
+    # =====================================================
+    # Crear expediente
+    # =====================================================
     exp = ExpedienteElectronico(
         rub=rub,
         nombre_beneficiario=payload.nombre_beneficiario,
@@ -107,11 +140,15 @@ def crear_expediente_core(payload: ExpedienteCreate, db: Session) -> ExpedienteE
         departamento_id=payload.departamento_id,
         municipio_id=payload.municipio_id,
         anio_carga=anio_carga,
+        estado_flujo_id=estado_activo.id,   # 👈 SETEO CLAVE
         updated_at=datetime.utcnow(),
     )
     db.add(exp)
     db.flush()  # exp.id disponible
 
+    # =====================================================
+    # Info general (opcional)
+    # =====================================================
     ig = None
     if payload.info_general is not None:
         data_ig = payload.info_general.model_dump(exclude_none=True)
@@ -135,18 +172,33 @@ def crear_expediente_core(payload: ExpedienteCreate, db: Session) -> ExpedienteE
         ig = InfoGeneral(expediente_id=exp.id, **data_ig)
         db.add(ig)
 
+    # =====================================================
+    # Commit
+    # =====================================================
     try:
         db.commit()
     except IntegrityError as ie:
         db.rollback()
         msg = str(ie).lower()
         if "uq_expediente_cui_anio" in msg or ("cui_beneficiario" in msg and "anio_carga" in msg):
-            raise HTTPException(status_code=409, detail=f"Ya existe un expediente con ese CUI para el año {anio_carga}.")
+            raise HTTPException(
+                status_code=409,
+                detail=f"Ya existe un expediente con ese CUI para el año {anio_carga}."
+            )
         if "uq_expediente_rub_anio" in msg or ("rub" in msg and "anio_carga" in msg):
-            raise HTTPException(status_code=409, detail=f"Ya existe un expediente con ese RUB para el año {anio_carga}.")
+            raise HTTPException(
+                status_code=409,
+                detail=f"Ya existe un expediente con ese RUB para el año {anio_carga}."
+            )
         if "bpm_instance_id" in msg and "unique" in msg:
-            raise HTTPException(status_code=409, detail="bpm_instance_id ya existe en otro expediente")
-        raise HTTPException(status_code=500, detail=f"Error de integridad al crear expediente: {str(ie)}")
+            raise HTTPException(
+                status_code=409,
+                detail="bpm_instance_id ya existe en otro expediente"
+            )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error de integridad al crear expediente: {str(ie)}"
+        )
 
     db.refresh(exp)
 
@@ -245,8 +297,18 @@ def buscar_expedientes(db: Session, payload: ExpedienteSearchRequest) -> Expedie
             ExpedienteElectronico.estado_expediente,
             ExpedienteElectronico.bpm_status,
             ExpedienteElectronico.bpm_current_task_name,
+
+            # ✅ Estado de flujo (catálogo)
+            CatEstadoFlujoExpediente.codigo.label("estado_flujo_codigo"),
+            CatEstadoFlujoExpediente.nombre.label("estado_flujo_nombre"),
+
+            # ✅ Territorio
             CatDepartamento.nombre.label("departamento"),
             CatMunicipio.nombre.label("municipio"),
+        )
+        .outerjoin(
+            CatEstadoFlujoExpediente,
+            CatEstadoFlujoExpediente.id == ExpedienteElectronico.estado_flujo_id,
         )
         .outerjoin(CatDepartamento, CatDepartamento.id == ExpedienteElectronico.departamento_id)
         .outerjoin(CatMunicipio, CatMunicipio.id == ExpedienteElectronico.municipio_id)
@@ -271,6 +333,11 @@ def buscar_expedientes(db: Session, payload: ExpedienteSearchRequest) -> Expedie
             estado_expediente=r.estado_expediente,
             bpm_status=r.bpm_status,
             bpm_current_task_name=r.bpm_current_task_name,
+
+            # ✅ Nuevo en response (asegúrate que exista en el schema)
+            estado_flujo_codigo=getattr(r, "estado_flujo_codigo", None),
+            estado_flujo_nombre=getattr(r, "estado_flujo_nombre", None),
+
             departamento=r.departamento,
             municipio=r.municipio,
         )
@@ -278,7 +345,6 @@ def buscar_expedientes(db: Session, payload: ExpedienteSearchRequest) -> Expedie
     ]
 
     return ExpedienteSearchResponse(data=data, page=payload.page, limit=payload.limit, total=total)
-
 
 def listar_documentos_expediente(db: Session, expediente_id: int, tab: str) -> List[Dict[str, Any]]:
     tab = validar_tab(tab)
@@ -575,3 +641,160 @@ def listar_tracking_expediente_core(db: Session, expediente_id: int) -> List[Tra
         .order_by(TrackingEvento.fecha_evento.desc(), TrackingEvento.created_at.desc())
         .all()
     )
+
+
+def set_expediente_bpm_minimo_core(
+    db: Session,
+    *,
+    expediente_id: int,
+    spiff_instance: dict,
+) -> None:
+    db.execute(
+        text("""
+            UPDATE expediente_electronico
+            SET
+              bpm_instance_id       = :iid,
+              bpm_status            = :st,
+              bpm_current_task_name = :task,
+              bpm_process_key       = :pkey,
+              bpm_last_sync_at      = :sync_at,
+              updated_at            = :upd_at
+            WHERE id = :eid
+        """),
+        {
+            "eid": expediente_id,
+            "iid": str(spiff_instance.get("id")),
+            "st": spiff_instance.get("status"),
+            "task": spiff_instance.get("last_milestone_bpmn_name"),
+            "pkey": spiff_instance.get("process_model_identifier"),
+            "sync_at": datetime.utcnow(),
+            "upd_at": datetime.utcnow(),
+        },
+    )
+
+def actualizar_titular_y_estado_flujo(
+    db: Session,
+    expediente_id: int,
+    titular_nombre: str,
+    titular_dpi: str,
+):
+    # 1) Obtener el estado TITULAR_CARGADO
+    estado = db.execute(
+        text("""
+            SELECT id, codigo, nombre
+            FROM cat_estado_flujo_expediente
+            WHERE codigo = :codigo
+              AND activo = TRUE
+            LIMIT 1
+        """),
+        {"codigo": ESTADO_FLUJO_TITULAR_CARGADO},
+    ).mappings().first()
+
+    if not estado:
+        raise ValueError("Estado de flujo TITULAR_CARGADO no existe o está inactivo")
+
+    # 2) Actualizar expediente
+    row = db.execute(
+        text("""
+            UPDATE expediente_electronico
+               SET titular_nombre = :titular_nombre,
+                   titular_dpi = :titular_dpi,
+                   estado_flujo_id = :estado_flujo_id,
+                   updated_at = NOW()
+             WHERE id = :id
+         RETURNING id, titular_nombre, titular_dpi, estado_flujo_id
+        """),
+        {
+            "id": expediente_id,
+            "titular_nombre": titular_nombre.strip(),
+            "titular_dpi": titular_dpi.strip(),
+            "estado_flujo_id": estado["id"],
+        },
+    ).mappings().first()
+
+    if not row:
+        return None
+
+    db.commit()
+
+    return {
+        "expediente_id": row["id"],
+        "titular_nombre": row["titular_nombre"],
+        "titular_dpi": row["titular_dpi"],
+        "estado_flujo_id": row["estado_flujo_id"],
+        "estado_flujo_codigo": estado["codigo"],
+        "estado_flujo_nombre": estado["nombre"],
+    }
+
+def confirmar_documentos_cargados(db: Session, expediente_id: int):
+    # 1) Resolver estado destino
+    estado = db.execute(
+        text("""
+            SELECT id, codigo, nombre
+            FROM cat_estado_flujo_expediente
+            WHERE codigo = :codigo AND activo = TRUE
+            LIMIT 1
+        """),
+        {"codigo": ESTADO_FLUJO_DOCS_CARGADOS},
+    ).mappings().first()
+
+    if not estado:
+        raise ValueError("Estado de flujo DOCS_CARGADOS no existe o está inactivo")
+
+    # 2) (Opcional) Validación mínima (si quieres bloquear avanzar sin docs)
+    #    Si ya tienes validación en otro lugar, déjalo comentado:
+    #
+    # has_docs = db.execute(
+    #     text("SELECT 1 FROM documentos_y_anexos WHERE expediente_id = :id LIMIT 1"),
+    #     {"id": expediente_id},
+    # ).first()
+    # if not has_docs:
+    #     raise ValueError("No hay documentos vinculados para confirmar")
+
+    # 3) Actualizar expediente
+    row = db.execute(
+        text("""
+            UPDATE expediente_electronico
+               SET estado_flujo_id = :estado_flujo_id,
+                   updated_at = NOW()
+             WHERE id = :id
+         RETURNING id, estado_flujo_id
+        """),
+        {"id": expediente_id, "estado_flujo_id": estado["id"]},
+    ).mappings().first()
+
+    if not row:
+        return None
+
+    db.commit()
+
+    return {
+        "expediente_id": row["id"],
+        "estado_flujo_id": row["estado_flujo_id"],
+        "estado_flujo_codigo": estado["codigo"],
+        "estado_flujo_nombre": estado["nombre"],
+    }
+
+
+def pasar_a_docs_verificados(db: Session, expediente_id: int):
+    row = db.execute(
+        text("""
+            UPDATE expediente_electronico
+            SET estado_flujo_id = (
+                SELECT id
+                FROM cat_estado_flujo_expediente
+                WHERE codigo = 'DOCS_VERIFICADOS'
+                LIMIT 1
+            ),
+            updated_at = NOW()
+            WHERE id = :id
+            RETURNING id, estado_flujo_id
+        """),
+        {"id": expediente_id},
+    ).mappings().first()
+
+    if not row:
+        return None
+
+    db.commit()
+    return dict(row)

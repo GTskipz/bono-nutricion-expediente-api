@@ -19,6 +19,7 @@ from app.schemas.expediente import (
     ExpedienteOut,
     ExpedienteSearchRequest,
     ExpedienteSearchResponse,
+    ExpedienteTitularIn
 )
 from app.schemas.tracking_evento import TrackingCreate, TrackingOut
 
@@ -33,6 +34,10 @@ from app.services.expedientes_service import (
     upload_documento_por_tipo_core,
     crear_tracking_evento_core,
     listar_tracking_expediente_core,
+    set_expediente_bpm_minimo_core,
+    actualizar_titular_y_estado_flujo,
+    confirmar_documentos_cargados,
+    pasar_a_docs_verificados
 )
 
 from app.services.documentos.carta_aceptacion import generar_carta_aceptacion_docx_bytes
@@ -181,3 +186,43 @@ def descargar_carta_pdf(expediente_id: int, db: Session = Depends(get_db)):
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+@router.post("/{expediente_id}/titular")
+def registrar_titular(
+    expediente_id: int,
+    payload: ExpedienteTitularIn,
+    db: Session = Depends(get_db),
+):
+    try:
+        row = actualizar_titular_y_estado_flujo(
+            db,
+            expediente_id=expediente_id,
+            titular_nombre=payload.titular_nombre,
+            titular_dpi=payload.titular_dpi,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Expediente no encontrado")
+
+    return row
+
+@router.post("/{expediente_id}/documentos/confirmar")
+def confirmar_docs(expediente_id: int, db: Session = Depends(get_db)):
+    try:
+        row = confirmar_documentos_cargados(db, expediente_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Expediente no encontrado")
+
+    return row
+
+@router.post("/{expediente_id}/documentos/verificar")
+def verificar_docs(expediente_id: int, db: Session = Depends(get_db)):
+    row = pasar_a_docs_verificados(db, expediente_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Expediente no encontrado")
+    return row

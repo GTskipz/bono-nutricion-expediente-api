@@ -15,7 +15,7 @@ from app.services.utils import (
 )
 
 # ✅ Reusar creación oficial de expediente
-from app.routers.expedientes import crear_expediente_core
+from app.routers.expedientes import crear_expediente_core, set_expediente_bpm_minimo_core
 from app.schemas.expediente import ExpedienteCreate, InfoGeneralIn
 
 from app.bpm.bpm_client import BpmClient
@@ -422,6 +422,14 @@ class SesanService:
         print(f"[SESAN] ▶️ Creando expediente electrónico row_id={row_id}")
         payload = self._build_expediente_payload_from_row(row, anio_carga, mes_carga)
         exp = crear_expediente_core(payload, self.db)
+        
+        set_expediente_bpm_minimo_core(
+            self.db,
+            expediente_id=int(exp.id),
+            spiff_instance=bpm_eval.raw_status,
+        )
+
+        self.db.commit()  # porque crear_expediente_core ya commit
 
         self._set_row_processed(row_id, int(exp.id))
         self._recalc_batch_counts(int(row["batch_id"]))

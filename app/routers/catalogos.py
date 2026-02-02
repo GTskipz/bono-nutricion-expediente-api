@@ -10,6 +10,7 @@ from app.schemas.cat_area_salud import AreaSaludOut
 from app.schemas.cat_distrito_salud import DistritoSaludOut
 from app.schemas.cat_servicio_salud import ServicioSaludOut
 from app.schemas.cat_sexo import SexoOut
+from app.schemas.cat_estado_flujo_expediente import EstadoFlujoExpedienteOut
 
 from app.services.catalogos_service import (
     get_departamentos,
@@ -20,6 +21,7 @@ from app.services.catalogos_service import (
     get_servicios_salud,
     get_sexos,
     get_tipos_documento_public,
+    get_estados_flujo_expediente
 )
 
 router = APIRouter(prefix="/catalogos", tags=["Catálogos"])
@@ -82,3 +84,10 @@ def listar_tipos_documento_publico(
     db: Session = Depends(get_db),
 ):
     return get_tipos_documento_public(db, obligatorios=obligatorios, activos=activos)
+
+@router.get("/estado-flujo-expediente", response_model=list[EstadoFlujoExpedienteOut])
+def listar_estados_flujo_expediente(
+    solo_activos: bool = Query(True, description="Si true, retorna solo activos"),
+    db: Session = Depends(get_db),
+):
+    return get_estados_flujo_expediente(db, solo_activos=solo_activos)

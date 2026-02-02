@@ -82,6 +82,9 @@ class ExpedienteOut(BaseModel):
     nombre_beneficiario: Optional[str] = None
     cui_beneficiario: Optional[str] = None
 
+    titular_nombre: Optional[str] = None
+    titular_dpi: Optional[str] = None
+
     # ✅ NUEVO: RUB
     rub: Optional[str] = None
 
@@ -121,7 +124,6 @@ class ExpedienteSearchRequest(BaseModel):
     page: int = Field(default=1, ge=1)
     limit: int = Field(default=10, ge=1, le=50)
 
-
 class ExpedienteSearchItem(BaseModel):
     id: int
     created_at: Optional[datetime] = None
@@ -129,12 +131,19 @@ class ExpedienteSearchItem(BaseModel):
     nombre_beneficiario: Optional[str] = None
     cui_beneficiario: Optional[str] = None
 
+    titular_nombre: Optional[str] = None
+    titular_dpi: Optional[str] = None
+
     # ✅ Útil en bandeja/búsqueda si lo quieres mostrar o filtrar
     rub: Optional[str] = None
 
     estado_expediente: Optional[str] = None
     bpm_status: Optional[str] = None
     bpm_current_task_name: Optional[str] = None
+
+    # 🔴 NUEVO: estado de flujo (cat_estado_flujo_expediente)
+    estado_flujo_codigo: Optional[str] = None
+    estado_flujo_nombre: Optional[str] = None
 
     # Para mostrar nombre en bandeja (join)
     departamento: Optional[str] = None
@@ -148,3 +157,7 @@ class ExpedienteSearchResponse(BaseModel):
     page: int
     limit: int
     total: int
+
+class ExpedienteTitularIn(BaseModel):
+    titular_nombre: str = Field(..., min_length=3, max_length=160)
+    titular_dpi: str = Field(..., min_length=6, max_length=32)

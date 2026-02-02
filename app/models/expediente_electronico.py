@@ -54,6 +54,16 @@ class ExpedienteElectronico(Base):
         String(30), nullable=False, default="ABIERTO", index=True
     )
 
+    estado_flujo_id: Mapped[int | None] = mapped_column(
+    BigInteger,
+    ForeignKey("cat_estado_flujo_expediente.id"),
+    nullable=True,
+    index=True,
+    )
+
+    titular_nombre: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    titular_dpi: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
     # BPM (snapshot)
     bpm_process_key: Mapped[str | None] = mapped_column(String(120))
     bpm_instance_id: Mapped[str | None] = mapped_column(String(120), unique=True)

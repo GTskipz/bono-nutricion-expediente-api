@@ -10,6 +10,7 @@ from app.models.cat_area_salud import CatAreaSalud
 from app.models.cat_distrito_salud import CatDistritoSalud
 from app.models.cat_servicio_salud import CatServicioSalud
 from app.models.cat_sexo import CatSexo
+from sqlalchemy import text
 
 
 def get_departamentos(db: Session) -> List[CatDepartamento]:
@@ -103,3 +104,13 @@ def get_tipos_documento_public(
         }
         for r in rows
     ]
+
+def get_estados_flujo_expediente(db: Session, solo_activos: bool = True):
+    sql = """
+    SELECT id, codigo, nombre, descripcion, orden, activo
+    FROM cat_estado_flujo_expediente
+    WHERE (:solo_activos = FALSE OR activo = TRUE)
+    ORDER BY orden ASC, nombre ASC
+    """
+    rows = db.execute(text(sql), {"solo_activos": solo_activos}).mappings().all()
+    return [dict(r) for r in rows]
