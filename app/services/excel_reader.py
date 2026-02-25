@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from fastapi import HTTPException
-from io import BytesIO
 import openpyxl
 import re
 import unicodedata
+from typing import Iterator, Optional
 
 
 def norm_header(s) -> str:
@@ -33,13 +33,18 @@ def norm_header(s) -> str:
     return s
 
 
-def find_header_row(ws, max_scan_rows=40, max_scan_cols=80) -> int | None:
+# =====================================================
+# ✅ NUEVO: find_header_row compatible con read_only (iter_rows)
+# =====================================================
+def find_header_row_iter(ws, max_scan_rows: int = 40, max_scan_cols: int = 80) -> int | None:
     """
     Busca la fila donde están los encabezados.
     Heurística: fila que contiene (normalizado) al menos estos “mínimos”:
       - CUI DEL NINO (o variantes)
       - NOMBRE DEL NINO (o variantes)
       - ANO / MES
+
+    ✅ Compatible con openpyxl read_only=True usando iter_rows(values_only=True)
     """
     triggers = [
         {"CUI DEL NINO", "CUI NINO", "CUI"},
@@ -51,9 +56,11 @@ def find_header_row(ws, max_scan_rows=40, max_scan_cols=80) -> int | None:
     best_row = None
     best_score = -1
 
-    for r in range(1, max_scan_rows + 1):
-        row_vals = [ws.cell(r, c).value for c in range(1, max_scan_cols + 1)]
-        norm_vals = {norm_header(v) for v in row_vals if v not in (None, "")}
+    for idx, row in enumerate(
+        ws.iter_rows(min_row=1, max_row=max_scan_rows, max_col=max_scan_cols, values_only=True),
+        start=1
+    ):
+        norm_vals = {norm_header(v) for v in row if v not in (None, "")}
 
         score = 0
         for group in triggers:
@@ -62,39 +69,52 @@ def find_header_row(ws, max_scan_rows=40, max_scan_cols=80) -> int | None:
 
         if score > best_score:
             best_score = score
-            best_row = r
+            best_row = idx
 
         if score == len(triggers):
-            return r
+            return idx
 
     if best_score >= 3:
         return best_row
     return None
 
 
-def read_sesan_xlsx_rows(file_bytes: bytes) -> list[dict]:
+# =====================================================
+# ✅ NUEVO: iterator streaming (NO lista gigante)
+# =====================================================
+def iter_sesan_xlsx_rows(file_path: str) -> Iterator[dict]:
     """
-    Lee el Excel SESAN en memoria.
-    - Detecta la fila real del header automáticamente.
-    - Normaliza headers (acentos, símbolos, dobles espacios).
-    - No exige “25 columnas fijas”; solo exige mínimas.
-    - Permite columnas extra (se guardan en raw_data).
-    - Devuelve filas con keys canónicas para insertar staging.
-    """
-    bio = BytesIO(file_bytes)
-    wb = openpyxl.load_workbook(bio, data_only=True)
+    Lee el Excel SESAN en streaming desde disco.
+    - Detecta fila de header automáticamente (read_only)
+    - Normaliza headers
+    - Permite columnas extra (raw)
+    - Devuelve filas con keys canónicas para staging
+    - NO construye lista: yield fila por fila ✅ (robusto 60k+)
 
+    Uso:
+        for item in iter_sesan_xlsx_rows(tmp_path):
+            ...
+    """
+    wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
     ws = wb["SEVEROS"] if "SEVEROS" in wb.sheetnames else wb.active
 
-    header_row = find_header_row(ws)
+    header_row = find_header_row_iter(ws)
     if not header_row:
         raise HTTPException(
             status_code=422,
             detail="No se pudo detectar el encabezado del archivo SESAN (fila de títulos).",
         )
 
-    max_cols = min(int(ws.max_column or 0) or 80, 120)
-    raw_headers = [ws.cell(row=header_row, column=c).value for c in range(1, max_cols + 1)]
+    # Leer headers (fila header_row)
+    header_values = next(ws.iter_rows(min_row=header_row, max_row=header_row, values_only=True), None)
+    if not header_values:
+        raise HTTPException(status_code=422, detail="No se pudo leer el encabezado del archivo SESAN.")
+
+    raw_headers = list(header_values)
+    # Limitar columnas (en read_only max_column no es confiable)
+    max_cols = min(len(raw_headers) if len(raw_headers) > 0 else 80, 120)
+    raw_headers = raw_headers[:max_cols]
+
     norm_headers = [norm_header(h) for h in raw_headers]
 
     ALIASES = {
@@ -149,7 +169,7 @@ def read_sesan_xlsx_rows(file_bytes: bytes) -> list[dict]:
     }
 
     present = {h for h in norm_headers if h}
-    required_min = {"CUI DEL NINO", "NOMBRE DEL NINO", "ANO", "MES"}  # RUB es opcional
+    required_min = {"CUI DEL NINO", "NOMBRE DEL NINO", "ANO", "MES"}  # RUB opcional
     missing = sorted(required_min - present)
     if missing:
         raise HTTPException(
@@ -157,32 +177,43 @@ def read_sesan_xlsx_rows(file_bytes: bytes) -> list[dict]:
             detail=f"Estructura del archivo SESAN no coincide (faltan columnas críticas mínimas): {missing}",
         )
 
+    # mapa col (1-based) -> key canon
     col_to_key: dict[int, str] = {}
     for idx, h in enumerate(norm_headers, start=1):
         if h in CANON:
             col_to_key[idx] = CANON[h]
 
-    rows: list[dict] = []
-    for r in range(header_row + 1, ws.max_row + 1):
-        empty = 0
+    # Iterar filas de datos
+    excel_row = header_row
+    for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+        excel_row += 1
+        row = tuple(row[:max_cols])  # limitar
+
+        if all(v is None or str(v).strip() == "" for v in row):
+            continue
+
         row_canon: dict[str, object] = {}
         row_raw: dict[str, object] = {}
 
         for c in range(1, max_cols + 1):
-            val = ws.cell(row=r, column=c).value
+            val = row[c - 1] if (c - 1) < len(row) else None
             hdr = norm_headers[c - 1] or f"COL_{c}"
             row_raw[hdr] = val
-
-            if val is None or str(val).strip() == "":
-                empty += 1
 
             key = col_to_key.get(c)
             if key:
                 row_canon[key] = val
 
-        if empty == max_cols:
-            continue
+        yield {"excel_row": excel_row, "data": row_canon, "raw": row_raw}
 
-        rows.append({"excel_row": r, "data": row_canon, "raw": row_raw})
 
-    return rows
+# =====================================================
+# ✅ Mantener API vieja (compatibilidad): retorna lista
+#    pero ya no lee bytes: recibe file_path y convierte el iterador en lista
+# =====================================================
+def read_sesan_xlsx_rows(file_path: str) -> list[dict]:
+    """
+    Compatibilidad: ahora lee desde file_path y arma lista.
+    ⚠️ Para archivos grandes, usa iter_sesan_xlsx_rows() directamente.
+    """
+    return list(iter_sesan_xlsx_rows(file_path))

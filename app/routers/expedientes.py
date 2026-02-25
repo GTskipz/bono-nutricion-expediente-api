@@ -1,4 +1,5 @@
 from __future__ import annotations
+from sqlite3 import IntegrityError
 
 from fastapi import (
     APIRouter,
@@ -40,8 +41,22 @@ from app.services.expedientes_service import (
     pasar_a_docs_verificados
 )
 
+from app.schemas.expediente_contacto import (
+    ExpedienteContactoIn,
+    ExpedienteContactoOut,
+)
+from app.services.expediente_contacto_service import (
+    get_contacto_expediente,
+    upsert_contacto_expediente,
+)
+
 from app.services.documentos.carta_aceptacion import generar_carta_aceptacion_docx_bytes
 from app.utils.docx_to_pdf import docx_bytes_to_pdf_bytes
+
+from app.bpm.bpm_service_task_titular import BpmServiceTaskTitular
+from app.bpm.bpm_service_task_expediente_digital import BpmServiceTaskExpedienteDigital
+
+
 
 router = APIRouter(prefix="/expedientes", tags=["Expedientes"])
 
@@ -188,7 +203,7 @@ def descargar_carta_pdf(expediente_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=str(e))
 
 @router.post("/{expediente_id}/titular")
-def registrar_titular(
+async def registrar_titular(
     expediente_id: int,
     payload: ExpedienteTitularIn,
     db: Session = Depends(get_db),
@@ -199,6 +214,7 @@ def registrar_titular(
             expediente_id=expediente_id,
             titular_nombre=payload.titular_nombre,
             titular_dpi=payload.titular_dpi,
+            personalizado=payload.personalizado,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -206,10 +222,24 @@ def registrar_titular(
     if not row:
         raise HTTPException(status_code=404, detail="Expediente no encontrado")
 
+    # ✅ BPM (sin tocar BD)
+    try:
+        bpm = BpmServiceTaskTitular(db)
+        await bpm.procesar_titular(
+            expediente_id=expediente_id,
+            nombre_titular=payload.titular_nombre,
+            dpi_titular=payload.titular_dpi,
+            tiene_copia_recibo=True,
+            tiene_copia_dpi=True,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Error enviando titular a BPM: {str(e)}")
+
     return row
 
 @router.post("/{expediente_id}/documentos/confirmar")
-def confirmar_docs(expediente_id: int, db: Session = Depends(get_db)):
+async def confirmar_docs(expediente_id: int, db: Session = Depends(get_db)):
+    # 1) BD (ya hace commit adentro)
     try:
         row = confirmar_documentos_cargados(db, expediente_id)
     except ValueError as e:
@@ -218,6 +248,21 @@ def confirmar_docs(expediente_id: int, db: Session = Depends(get_db)):
     if not row:
         raise HTTPException(status_code=404, detail="Expediente no encontrado")
 
+    # 2) BPM (construye links relativos desde documentos_y_anexos y hace PUT)
+    try:
+        bpm = BpmServiceTaskExpedienteDigital(db)
+        await bpm.enviar_expediente_digital(
+            expediente_id=expediente_id,
+            observaciones_exp="Documentos enviados a verificación",
+            expediente_completo=True,     # si quieres, luego lo calculamos automáticamente
+            strict_links=True,            # si falta un doc requerido, falla con 400/502 según manejes
+        )
+    except ValueError as e:
+        # típicamente: faltan documentos requeridos (strict_links=True)
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Error enviando expediente digital a BPM: {str(e)}")
+
     return row
 
 @router.post("/{expediente_id}/documentos/verificar")
@@ -225,4 +270,31 @@ def verificar_docs(expediente_id: int, db: Session = Depends(get_db)):
     row = pasar_a_docs_verificados(db, expediente_id)
     if not row:
         raise HTTPException(status_code=404, detail="Expediente no encontrado")
+    return row
+
+@router.get("/{expediente_id}/contacto", response_model=ExpedienteContactoOut | None)
+def obtener_contacto(expediente_id: int, db: Session = Depends(get_db)):
+
+    return get_contacto_expediente(db, expediente_id)
+
+
+@router.put("/{expediente_id}/contacto", response_model=ExpedienteContactoOut)
+def guardar_contacto(
+    expediente_id: int,
+    payload: ExpedienteContactoIn,
+    db: Session = Depends(get_db),
+):
+
+    try:
+        row = upsert_contacto_expediente(db, expediente_id, payload)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail="El municipio no pertenece al departamento seleccionado.",
+        )
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Expediente no encontrado")
+
     return row

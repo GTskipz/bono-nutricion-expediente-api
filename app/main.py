@@ -17,12 +17,17 @@ from sqlalchemy.orm import Session
 
 from app.core.db import get_db
 from app.core.auth import parse_authorization_header
+from app.core.token_context import set_current_token  # ✅ NUEVO: setear token global por request
 
 from app.routers.catalogos import router as catalogos_router
 from app.routers.expedientes import router as expedientes_router
 from app.routers.sesan import router as sesan_router
 from app.routers.reportes import router as reportes_router
 from app.routers.bpm_router import router as bpm_router
+from app.routers.sesan_documentos import router as sesan_documentos
+from app.routers.bandejas import router as bandejas
+from app.routers.cuentas_bancarias import router as cuentas_bancarias
+from app.routers.pagos import router as pagos
 
 # 1. Importar el nuevo router de Archivos (MinIO)
 from app.routers.archivos import router as archivos_router
@@ -44,7 +49,6 @@ PUBLIC_PATHS = {
     "/redoc",
     # BPM (solo pruebas)
     "/bpm/auth/token",
-    
     # Opcional: Si quieres probar la subida SIN token al inicio, descomenta esta línea:
     "/archivos/generar-url-subida"
 }
@@ -57,13 +61,13 @@ async def require_bearer_token_middleware(request: Request, call_next):
 
     path = request.url.path
 
-    # Permitir rutas públicas + docs + endpoints BPM
+    # ✅ Permitir rutas públicas + docs + endpoints BPM
+    # ❗ OJO: ya NO se whitelistea /sesan (antes impedía setear token)
     if (
         path in PUBLIC_PATHS
         or path.startswith("/docs")
         or path.startswith("/redoc")
         or path.startswith("/bpm")   # ✅ /bpm/tasks/by-row/{row_id}
-        or path.startswith("/sesan")
         or path.startswith("/archivos/descargar")
     ):
         return await call_next(request)
@@ -78,8 +82,9 @@ async def require_bearer_token_middleware(request: Request, call_next):
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Guardar token para uso posterior (Spiff / BPM)
-    request.state.token = token
+    # ✅ Guardar token para uso posterior (Spiff / BPM)
+    set_current_token(token)      # ✅ esto alimenta a BpmClient.get_current_token()
+    request.state.token = token   # (opcional) si lo usas en otras partes
 
     return await call_next(request)
 
@@ -91,7 +96,7 @@ origins = [
     "http://localhost:3000",    # Por si usas otro puerto a veces
     "http://127.0.0.1:5174",    # Variante de localhost
     # Aquí se agregara la IP/Dominio del MIDES cuando se haga el despliegue
-    "http://145.32.10.230",      
+    "http://145.32.10.230",
 ]
 
 app.add_middleware(
@@ -110,8 +115,11 @@ app.include_router(expedientes_router)
 app.include_router(sesan_router)
 app.include_router(reportes_router)
 app.include_router(bpm_router)
-#Registrar el router de Archivos (MinIO)
+app.include_router(sesan_documentos)
 app.include_router(archivos_router)
+app.include_router(bandejas)
+app.include_router(cuentas_bancarias)
+app.include_router(pagos)
 
 # =====================================================
 # Endpoints base

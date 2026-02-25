@@ -6,7 +6,7 @@ import io   # Agregado para manejo de streams de bytes
 from fastapi import HTTPException, UploadFile
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from datetime import datetime
+from datetime import date, datetime
 import json
 
 from app.services.excel_reader import read_sesan_xlsx_rows
@@ -20,6 +20,10 @@ from app.schemas.expediente import ExpedienteCreate, InfoGeneralIn
 
 from app.bpm.bpm_client import BpmClient
 from app.bpm.bpm_payload_builder import build_spiff_payload_from_staging_row
+
+from app.models.sesan_batch import SesanBatch
+from app.models.sesan_batch_documento import SesanBatchDocumento
+from app.models.cat_tipo_doc_batch import CatTipoDocBatch
 
 # IMPORTAMOS EL CLIENTE MINIO (Agregado)
 try:
@@ -230,7 +234,8 @@ class SesanService:
         return bool(exists)
 
     def _build_expediente_payload_from_row(self, row: dict, anio_carga: int, mes_carga: int | None):
-        rub = to_rub(row.get("rub"))
+        #rub = to_rub(row.get("rub"))
+        rub = ""
         cui_nino = to_cui(row.get("cui_nino"))
         nombre_nino = norm_str(row.get("nombre_nino"))
 
@@ -288,7 +293,7 @@ class SesanService:
 
     # =====================================================
     # ✅ Procesar 1 fila (BPM decide → si aprueba crea expediente)
-    # =====================================================
+        # =====================================================
     async def _procesar_row_creando_expediente(self, row_id: int):
         print(f"[SESAN] ▶️ Iniciando procesamiento row_id={row_id}")
 
@@ -318,11 +323,7 @@ class SesanService:
 
         if row["estado"] == "PROCESADO" and row.get("expediente_id"):
             print(f"[SESAN] ✅ Row {row_id} ya procesada expediente_id={row.get('expediente_id')}")
-            return {
-                "row_id": row_id,
-                "estado": "PROCESADO",
-                "expediente_id": int(row["expediente_id"])
-            }
+            return {"row_id": row_id, "estado": "PROCESADO", "expediente_id": int(row["expediente_id"])}
 
         anio_carga = int(row["anio_carga"])
         mes_carga = int(row["mes_carga"]) if row.get("mes_carga") is not None else None
@@ -331,10 +332,7 @@ class SesanService:
         cui = to_cui(row.get("cui_nino"))
         nombre = norm_str(row.get("nombre_nino"))
 
-        print(
-            f"[SESAN] Datos básicos -> "
-            f"año={anio_carga} mes={mes_carga} rub={rub} cui={cui} nombre={nombre}"
-        )
+        print(f"[SESAN] Datos básicos -> año={anio_carga} mes={mes_carga} rub={rub} cui={cui} nombre={nombre}")
 
         if not cui:
             print(f"[SESAN][ERROR] ❌ CUI vacío row_id={row_id}")
@@ -370,7 +368,6 @@ class SesanService:
 
             print(f"[SESAN][BPM] Payload enviado:\n{payload_spiff}")
 
-            # Guardar request BPM (si existe columna)
             self._set_row_bpm_request(row_id=row_id, bpm_req=payload_spiff)
 
             print(f"[SESAN][BPM] ▶️ Enviando a Spiff (message registrar_nutricion)")
@@ -384,64 +381,76 @@ class SesanService:
                 f"should_create={bpm_eval.should_create_expediente}"
             )
 
-            # Guardar respuesta BPM (si existe columna)
+            iid = bpm_eval.bpm_instance_id
+            iid_str = str(iid) if iid and int(iid) > 0 else None
+
             self._set_row_bpm_result(
                 row_id=row_id,
                 bpm_status=bpm_eval.status,
-                bpm_res=bpm_eval.raw_status,
-                bpm_instance_id=str(bpm_eval.bpm_instance_id),
+                bpm_res=bpm_eval.raw_create,
+                bpm_instance_id=iid_str,
             )
 
-            if not bpm_eval.should_create_expediente:
-                print(f"[SESAN][BPM] ❌ NO permitido crear expediente (DPI no encontrado)")
-                # ✅ CORREGIDO: firma real (code, msg)
+            # ✅ FIX 1: si BPM dice crear, debe traer instance_id válido
+            if bpm_eval.should_create_expediente and not (iid and int(iid) > 0):
                 self._set_row_error(
                     row_id,
-                    "DPI_NO_ENCONTRADO",
-                    "No se pudo validar el DPI del niño en los registros oficiales."
+                    "BPM_SIN_INSTANCE_ID",
+                    "BPM indicó crear expediente pero no devolvió process_instance.id."
                 )
-                return {
-                    "row_id": row_id,
-                    "estado": "ERROR",
-                    "codigo": "DPI_NO_ENCONTRADO"
-                }
+                return {"row_id": row_id, "estado": "ERROR", "codigo": "BPM_SIN_INSTANCE_ID"}
+
+            if not bpm_eval.should_create_expediente:
+                print("[SESAN][BPM] ❌ NO permitido crear expediente (BPM rechazó/validación fallida)")
+                self._set_row_error(row_id, "BPM_NO_PERMITE_CREAR", "BPM no autorizó crear expediente para este registro.")
+                return {"row_id": row_id, "estado": "ERROR", "codigo": "BPM_NO_PERMITE_CREAR"}
 
         except Exception as e:
+            try:
+                self.db.rollback()
+            except Exception:
+                pass
+
             print(f"[SESAN][BPM][ERROR] ❌ {str(e)}")
-            # ✅ CORREGIDO: firma real (code, msg)
-            self._set_row_error(
-                row_id,
-                "BPM_ERROR",
-                str(e)
-            )
+            self._set_row_error(row_id, "BPM_ERROR", str(e))
             raise ValueError(f"BPM_ERROR|{str(e)}")
 
         # =====================================================
         # ✅ Crear expediente
         # =====================================================
-        print(f"[SESAN] ▶️ Creando expediente electrónico row_id={row_id}")
-        payload = self._build_expediente_payload_from_row(row, anio_carga, mes_carga)
-        exp = crear_expediente_core(payload, self.db)
+        try:
+            print(f"[SESAN] ▶️ Creando expediente electrónico row_id={row_id}")
+
+            payload = self._build_expediente_payload_from_row(row, anio_carga, mes_carga)
+            exp = crear_expediente_core(payload, self.db)
+
+            set_expediente_bpm_minimo_core(
+                self.db,
+                expediente_id=int(exp.id),
+                spiff_instance=bpm_eval.raw_create,
+            )
+
+            self.db.commit()
+
+            self._set_row_processed(row_id, int(exp.id))
+            self._recalc_batch_counts(int(row["batch_id"]))
+
+            print(f"[SESAN] ✅ Expediente creado id={exp.id} row_id={row_id}")
+
+            return {"row_id": row_id, "estado": "PROCESADO", "expediente_id": int(exp.id)}
+
+        except Exception as e:
+            # ✅ FIX 2: rollback SIEMPRE si falla creando/actualizando
+            try:
+                self.db.rollback()
+            except Exception:
+                pass
+
+            print(f"[SESAN][ERROR] ❌ Error creando expediente: {str(e)}")
+            self._set_row_error(row_id, "EXPEDIENTE_ERROR", str(e))
+            self.db.commit()
+            raise
         
-        set_expediente_bpm_minimo_core(
-            self.db,
-            expediente_id=int(exp.id),
-            spiff_instance=bpm_eval.raw_status,
-        )
-
-        self.db.commit()  # porque crear_expediente_core ya commit
-
-        self._set_row_processed(row_id, int(exp.id))
-        self._recalc_batch_counts(int(row["batch_id"]))
-
-        print(f"[SESAN] ✅ Expediente creado id={exp.id} row_id={row_id}")
-
-        return {
-            "row_id": row_id,
-            "estado": "PROCESADO",
-            "expediente_id": int(exp.id)
-        }
-
     # =====================================================
     # 1) Crear batch + staging (SUBIDA)
     # =====================================================
@@ -456,59 +465,98 @@ class SesanService:
         usuario_carga: str | None,
         file: UploadFile,
     ):
+        import os
+        import io
+        import json
+        import tempfile
+        from datetime import datetime
+        from sqlalchemy import text
+        from fastapi import HTTPException
+
+        from app.services.sesan_batch_documentos_service import crear_placeholders_docs_requeridos
+        # De tu módulo excel utils (ya lo modificamos):
+        # - iter_sesan_xlsx_rows(file_path)
+        from app.services.excel_reader import iter_sesan_xlsx_rows  # <-- ajusta al path real donde lo dejaste
+
         try:
-            file_bytes = file.file.read()
-            if not file_bytes:
-                raise HTTPException(status_code=400, detail="Archivo vacío.")
-
-            size_bytes = len(file_bytes)
-            checksum = sha256_bytes(file_bytes)
-
+            # =====================================================
+            # 1) Guardar UploadFile a TEMP sin cargar a RAM
+            # =====================================================
             ts = datetime.utcnow().strftime("%Y%m%d%H%M%S")
             safe_name = (file.filename or "sesan.xlsx").replace("\\", "_").replace("/", "_")
-            
-            # INICIO CAMBIO A MINIO (Mantiene lógica original, agrega MinIO)
+
+            fd, tmp_path = tempfile.mkstemp(suffix=f"_{safe_name}")
+            os.close(fd)
+
+            size_bytes = 0
+            file.file.seek(0)
+            with open(tmp_path, "wb") as out:
+                while True:
+                    chunk = file.file.read(1024 * 1024)  # 1MB
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    size_bytes += len(chunk)
+
+            if size_bytes == 0:
+                raise HTTPException(status_code=400, detail="Archivo vacío.")
+
+            # =====================================================
+            # 2) SHA256 desde disco (streaming)
+            # =====================================================
+            import hashlib
+            h = hashlib.sha256()
+            with open(tmp_path, "rb") as f:
+                while True:
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+            checksum = h.hexdigest()
+
+            # =====================================================
+            # 3) Subir a MinIO desde archivo (no BytesIO)
+            # =====================================================
             bucket_name = os.getenv("MINIO_BUCKET", "almacenamiento-mis")
-            # Estructura: sesan/2026/20260127120000_archivo.xlsx
             object_name = f"sesan/{anio_carga}/{ts}_{safe_name}"
 
             if minio_client:
-                # Subir el archivo real a MinIO
-                minio_client.put_object(
+                # fput_object es ideal para archivos grandes
+                minio_client.fput_object(
                     bucket_name,
                     object_name,
-                    io.BytesIO(file_bytes),
-                    size_bytes,
+                    tmp_path,
                     content_type=file.content_type
                 )
                 storage_provider = "MINIO"
-                storage_key = object_name 
+                storage_key = object_name
             else:
-                # Fallback original por si acaso falla la importación
                 print("Cliente MinIO no disponible, usando FTP simulado")
                 storage_provider = "ftp"
                 storage_key = f"ftp://PENDIENTE/sesan/{ts}_{safe_name}"
-            # FIN CAMBIO MINIO
 
+            # =====================================================
+            # 4) Insert sesan_batch (igual que antes)
+            # =====================================================
             batch_id = self.db.execute(
                 text("""
                     INSERT INTO sesan_batch (
-                      nombre_lote, descripcion, origen,
-                      anio_carga, mes_carga, usuario_carga,
-                      archivo_nombre_original, archivo_mime_type, archivo_size_bytes,
-                      storage_provider, storage_key, checksum_sha256,
-                      estado,
-                      total_registros, total_pendientes, total_procesados, total_error, total_ignorados,
-                      created_at, updated_at
+                    nombre_lote, descripcion, origen,
+                    anio_carga, mes_carga, usuario_carga,
+                    archivo_nombre_original, archivo_mime_type, archivo_size_bytes,
+                    storage_provider, storage_key, checksum_sha256,
+                    estado,
+                    total_registros, total_pendientes, total_procesados, total_error, total_ignorados,
+                    created_at, updated_at
                     )
                     VALUES (
-                      :nombre_lote, :descripcion, :origen,
-                      :anio_carga, :mes_carga, :usuario_carga,
-                      :archivo_nombre_original, :archivo_mime_type, :archivo_size_bytes,
-                      :storage_provider, :storage_key, :checksum_sha256,
-                      'CARGADO',
-                      0, 0, 0, 0, 0,
-                      NOW(), NOW()
+                    :nombre_lote, :descripcion, :origen,
+                    :anio_carga, :mes_carga, :usuario_carga,
+                    :archivo_nombre_original, :archivo_mime_type, :archivo_size_bytes,
+                    :storage_provider, :storage_key, :checksum_sha256,
+                    'CARGADO',
+                    0, 0, 0, 0, 0,
+                    NOW(), NOW()
                     )
                     RETURNING id
                 """),
@@ -530,48 +578,53 @@ class SesanService:
 
             batch_id = int(batch_id)
 
-            rows = read_sesan_xlsx_rows(file_bytes)
-            if not rows:
-                raise HTTPException(status_code=422, detail="No se encontraron filas válidas.")
+            # ✅ 4.1) Crear placeholders docs requeridos (sin archivos)
+            placeholders_created = crear_placeholders_docs_requeridos(self.db, batch_id)
 
+            # =====================================================
+            # 5) Insert staging por CHUNKS (executemany)
+            # =====================================================
             insert_staging = text("""
                 INSERT INTO sesan_staging (
-                  batch_id, row_num,
-                  rub,
-                  anio, mes, area_salud, distrito_salud, servicio_salud,
-                  departamento_residencia, municipio_residencia, comunidad_residencia, direccion_residencia,
-                  cui_nino, sexo, edad_en_anios, nombre_nino,
-                  fecha_nacimiento, fecha_primer_contacto, fecha_registro,
-                  cie_10, diagnostico,
-                  nombre_madre, cui_madre, nombre_padre, cui_padre, telefonos_encargados,
-                  validacion_raw,
-                  raw_data,
-                  estado,
-                  created_at, updated_at
+                batch_id, row_num,
+                rub,
+                anio, mes, area_salud, distrito_salud, servicio_salud,
+                departamento_residencia, municipio_residencia, comunidad_residencia, direccion_residencia,
+                cui_nino, sexo, edad_en_anios, nombre_nino,
+                fecha_nacimiento, fecha_primer_contacto, fecha_registro,
+                cie_10, diagnostico,
+                nombre_madre, cui_madre, nombre_padre, cui_padre, telefonos_encargados,
+                validacion_raw,
+                raw_data,
+                estado,
+                created_at, updated_at
                 )
                 VALUES (
-                  :batch_id, :row_num,
-                  :rub,
-                  :anio, :mes, :area_salud, :distrito_salud, :servicio_salud,
-                  :departamento_residencia, :municipio_residencia, :comunidad_residencia, :direccion_residencia,
-                  :cui_nino, :sexo, :edad_en_anios, :nombre_nino,
-                  :fecha_nacimiento, :fecha_primer_contacto, :fecha_registro,
-                  :cie_10, :diagnostico,
-                  :nombre_madre, :cui_madre, :nombre_padre, :cui_padre, :telefonos_encargados,
-                  :validacion_raw,
-                  CAST(:raw_data AS jsonb),
-                  'PENDIENTE',
-                  NOW(), NOW()
+                :batch_id, :row_num,
+                :rub,
+                :anio, :mes, :area_salud, :distrito_salud, :servicio_salud,
+                :departamento_residencia, :municipio_residencia, :comunidad_residencia, :direccion_residencia,
+                :cui_nino, :sexo, :edad_en_anios, :nombre_nino,
+                :fecha_nacimiento, :fecha_primer_contacto, :fecha_registro,
+                :cie_10, :diagnostico,
+                :nombre_madre, :cui_madre, :nombre_padre, :cui_padre, :telefonos_encargados,
+                :validacion_raw,
+                CAST(:raw_data AS jsonb),
+                'PENDIENTE',
+                NOW(), NOW()
                 )
             """)
 
+            CHUNK_SIZE = int(os.getenv("SESAN_STAGING_CHUNK", "1000"))
+            buffer = []
             total = 0
-            for item in rows:
+
+            # iterador streaming (no lista)
+            for item in iter_sesan_xlsx_rows(tmp_path):
                 r = item["data"]
                 raw_for_audit = item.get("raw") or {}
 
-                self.db.execute(
-                    insert_staging,
+                buffer.append(
                     {
                         "batch_id": batch_id,
                         "row_num": item["excel_row"],
@@ -614,6 +667,21 @@ class SesanService:
                 )
                 total += 1
 
+                if len(buffer) >= CHUNK_SIZE:
+                    # ✅ 1 llamada por 1000 filas (mucho más rápido)
+                    self.db.execute(insert_staging, buffer)
+                    buffer.clear()
+
+            # flush final
+            if buffer:
+                self.db.execute(insert_staging, buffer)
+
+            if total == 0:
+                raise HTTPException(status_code=422, detail="No se encontraron filas válidas.")
+
+            # =====================================================
+            # 6) Recalcular counts + commit
+            # =====================================================
             self._recalc_batch_counts(batch_id)
             self.db.commit()
 
@@ -622,6 +690,7 @@ class SesanService:
                 "total_registros": total,
                 "storage_key": storage_key,
                 "checksum_sha256": checksum,
+                "docs_placeholders_created": placeholders_created,
             }
 
         except HTTPException:
@@ -630,28 +699,74 @@ class SesanService:
         except Exception as e:
             self.db.rollback()
             raise HTTPException(status_code=500, detail=f"Error creando batch SESAN: {str(e)}")
+        finally:
+            # limpiar archivo temporal
+            try:
+                if "tmp_path" in locals() and tmp_path and os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
 
     # =====================================================
     # 2) Listar batches por año
     # =====================================================
-    def listar_batches_por_anio(self, *, anio: int, page: int, limit: int):
+    def listar_batches(
+        self,
+        *,
+        anio: int,
+        mes: int | None,
+        estado: str | None,
+        fecha_inicio: date | None,
+        fecha_fin: date | None,
+        page: int,
+        limit: int,
+    ):
         offset = (page - 1) * limit
 
+        where = ["anio_carga = :anio"]
+        params: dict = {"anio": anio, "offset": offset, "limit": limit}
+
+        # mes
+        if mes is not None:
+            where.append("mes_carga = :mes")
+            params["mes"] = mes
+
+        # estado (legacy string)
+        if estado:
+            where.append("UPPER(estado) = UPPER(:estado)")
+            params["estado"] = estado
+
+        # fechas sobre created_at
+        # - inicio: desde las 00:00:00 del día
+        if fecha_inicio is not None:
+            where.append("created_at >= :fecha_inicio")
+            params["fecha_inicio"] = fecha_inicio
+
+        # - fin: inclusivo por día (hasta < fin + 1 día)
+        #   para que si el usuario elige 2026-02-16, incluya TODO ese día
+        if fecha_fin is not None:
+            where.append("created_at < (:fecha_fin::date + INTERVAL '1 day')")
+            params["fecha_fin"] = fecha_fin
+
+        where_sql = " AND ".join(where)
+
+        # COUNT
         total = self.db.execute(
-            text("SELECT COUNT(*) FROM sesan_batch WHERE anio_carga = :anio"),
-            {"anio": anio},
+            text(f"SELECT COUNT(*) FROM sesan_batch WHERE {where_sql}"),
+            params,
         ).scalar() or 0
 
+        # DATA
         rows = self.db.execute(
-            text("""
+            text(f"""
                 SELECT *
                 FROM sesan_batch
-                WHERE anio_carga = :anio
+                WHERE {where_sql}
                 ORDER BY created_at DESC
                 OFFSET :offset
                 LIMIT :limit
             """),
-            {"anio": anio, "offset": offset, "limit": limit},
+            params,
         ).mappings().all()
 
         return {
@@ -1007,3 +1122,95 @@ class SesanService:
             )
         except Exception as e:
             print(f"[SESAN][BPM][WARN] No se pudo guardar bpm_request (¿falta bpm_request_json?): {e}")
+
+    # =====================================================
+    # CONSULTA DETALLE BATCH
+    # =====================================================
+
+    def obtener_batch(self, batch_id: int) -> dict:
+        row = self.db.execute(
+            text("""
+                SELECT
+                    id,
+                    nombre_lote,
+                    descripcion,
+                    origen,
+                    anio_carga,
+                    mes_carga,
+                    usuario_carga,
+                    estado,
+                    total_registros,
+                    total_pendientes,
+                    total_procesados,
+                    total_error,
+                    total_ignorados,
+                    archivo_nombre_original,
+                    archivo_mime_type,
+                    archivo_size_bytes,
+                    storage_provider,
+                    storage_key,
+                    checksum_sha256,
+                    created_at,
+                    updated_at
+                FROM sesan_batch
+                WHERE id = :id
+            """),
+            {"id": batch_id},
+        ).mappings().first()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Batch no encontrado.")
+
+        return dict(row)
+
+
+    def listar_documentos_batch(self, batch_id: int) -> list[dict]:
+        rows = self.db.execute(
+            text("""
+                SELECT
+                    d.id,
+                    d.batch_id,
+                    d.tipo_doc_id,
+                    t.codigo AS tipo_codigo,
+                    t.nombre AS tipo_nombre,
+                    t.descripcion AS tipo_descripcion,
+                    t.requerido,
+                    t.orden,
+                    t.activo,
+
+                    d.fecha_documento,
+                    d.archivo_nombre_original,
+                    d.archivo_mime_type,
+                    d.archivo_size_bytes,
+                    d.storage_provider,
+                    d.storage_key,
+                    d.checksum_sha256,
+                    d.created_at,
+                    d.updated_at,
+
+                    CASE
+                        WHEN d.storage_key IS NULL
+                          OR d.storage_key = 'PENDIENTE'
+                        THEN TRUE
+                        ELSE FALSE
+                    END AS is_placeholder
+
+                FROM sesan_batch_documento d
+                JOIN cat_tipo_doc_batch t ON t.id = d.tipo_doc_id
+                WHERE d.batch_id = :batch_id
+                ORDER BY t.orden ASC, t.id ASC
+            """),
+            {"batch_id": batch_id},
+        ).mappings().all()
+
+        return [dict(r) for r in rows]
+
+
+    def obtener_detalle_batch(self, batch_id: int) -> dict:
+        batch = self.obtener_batch(batch_id)
+        documentos = self.listar_documentos_batch(batch_id)
+
+        return {
+            "batch": batch,
+            "documentos": documentos,
+        }

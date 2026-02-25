@@ -4,12 +4,10 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import hashlib
-### [CAMBIO INTEGRACION MINIO] Imports necesarios para manejo de streams y sistema operativo
 import io
 import os
-# Importamos el cliente de MinIO configurado en el proyecto
-from app.core.minio import minio_client 
-### --------------------------------------------------------------------------
+
+from app.core.minio import minio_client
 
 from fastapi import HTTPException
 from sqlalchemy import func, or_, text
@@ -35,6 +33,11 @@ from app.schemas.expediente import (
     BuscarPor,
 )
 from app.schemas.tracking_evento import TrackingCreate
+
+from app.models.expediente_contacto import ExpedienteContacto
+
+# ✅ Tracking institucional (eventos importantes)
+from app.services.tracking_evento_service import TrackingEventoService
 
 
 # =====================================================
@@ -79,9 +82,6 @@ def crear_expediente_core(payload: ExpedienteCreate, db: Session) -> ExpedienteE
     rub = getattr(payload, "rub", None)
     cui = getattr(payload, "cui_beneficiario", None)
 
-    # =====================================================
-    # Obtener estado de flujo inicial (ACTIVO)
-    # =====================================================
     estado_activo = (
         db.query(CatEstadoFlujoExpediente)
         .filter(
@@ -97,9 +97,6 @@ def crear_expediente_core(payload: ExpedienteCreate, db: Session) -> ExpedienteE
             detail="No existe el estado de flujo inicial (codigo=ACTIVO)."
         )
 
-    # =====================================================
-    # Pre-validaciones de unicidad
-    # =====================================================
     if cui:
         exists_cui = (
             db.query(ExpedienteElectronico.id)
@@ -115,24 +112,6 @@ def crear_expediente_core(payload: ExpedienteCreate, db: Session) -> ExpedienteE
                 detail=f"Ya existe un expediente con ese CUI para el año {anio_carga}."
             )
 
-    if rub:
-        exists_rub = (
-            db.query(ExpedienteElectronico.id)
-            .filter(
-                ExpedienteElectronico.rub == rub,
-                ExpedienteElectronico.anio_carga == anio_carga,
-            )
-            .first()
-        )
-        if exists_rub:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Ya existe un expediente con ese RUB para el año {anio_carga}."
-            )
-
-    # =====================================================
-    # Crear expediente
-    # =====================================================
     exp = ExpedienteElectronico(
         rub=rub,
         nombre_beneficiario=payload.nombre_beneficiario,
@@ -140,15 +119,12 @@ def crear_expediente_core(payload: ExpedienteCreate, db: Session) -> ExpedienteE
         departamento_id=payload.departamento_id,
         municipio_id=payload.municipio_id,
         anio_carga=anio_carga,
-        estado_flujo_id=estado_activo.id,   # 👈 SETEO CLAVE
+        estado_flujo_id=estado_activo.id,
         updated_at=datetime.utcnow(),
     )
     db.add(exp)
-    db.flush()  # exp.id disponible
+    db.flush()
 
-    # =====================================================
-    # Info general (opcional)
-    # =====================================================
     ig = None
     if payload.info_general is not None:
         data_ig = payload.info_general.model_dump(exclude_none=True)
@@ -172,9 +148,6 @@ def crear_expediente_core(payload: ExpedienteCreate, db: Session) -> ExpedienteE
         ig = InfoGeneral(expediente_id=exp.id, **data_ig)
         db.add(ig)
 
-    # =====================================================
-    # Commit
-    # =====================================================
     try:
         db.commit()
     except IntegrityError as ie:
@@ -246,6 +219,36 @@ def obtener_expediente_detalle(db: Session, expediente_id: int) -> ExpedienteEle
     exp.departamento = departamento
     exp.municipio = municipio
 
+    contacto_row = (
+        db.query(
+            ExpedienteContacto,
+            CatDepartamento.nombre.label("contacto_departamento"),
+            CatMunicipio.nombre.label("contacto_municipio"),
+        )
+        .outerjoin(CatDepartamento, CatDepartamento.id == ExpedienteContacto.departamento_id)
+        .outerjoin(CatMunicipio, CatMunicipio.id == ExpedienteContacto.municipio_id)
+        .filter(ExpedienteContacto.expediente_id == exp.id)
+        .first()
+    )
+
+    if contacto_row:
+        c, c_dep, c_mun = contacto_row
+        exp.contacto = {
+            "expediente_id": c.expediente_id,
+            "nombre_contacto": c.nombre_contacto,
+            "departamento_id": c.departamento_id,
+            "departamento_nombre": c_dep,
+            "municipio_id": c.municipio_id,
+            "municipio_nombre": c_mun,
+            "poblado": c.poblado,
+            "direccion": c.direccion,
+            "anotaciones_direccion": c.anotaciones_direccion,
+            "telefono_1": c.telefono_1,
+            "telefono_2": c.telefono_2,
+        }
+    else:
+        exp.contacto = None
+
     docs = getattr(exp, "docs_required_status", None)
     exp.docs_required_state = "COMPLETO" if isinstance(docs, dict) and docs.get("completo") is True else "PENDIENTE"
 
@@ -298,11 +301,9 @@ def buscar_expedientes(db: Session, payload: ExpedienteSearchRequest) -> Expedie
             ExpedienteElectronico.bpm_status,
             ExpedienteElectronico.bpm_current_task_name,
 
-            # ✅ Estado de flujo (catálogo)
             CatEstadoFlujoExpediente.codigo.label("estado_flujo_codigo"),
             CatEstadoFlujoExpediente.nombre.label("estado_flujo_nombre"),
 
-            # ✅ Territorio
             CatDepartamento.nombre.label("departamento"),
             CatMunicipio.nombre.label("municipio"),
         )
@@ -334,7 +335,6 @@ def buscar_expedientes(db: Session, payload: ExpedienteSearchRequest) -> Expedie
             bpm_status=r.bpm_status,
             bpm_current_task_name=r.bpm_current_task_name,
 
-            # ✅ Nuevo en response (asegúrate que exista en el schema)
             estado_flujo_codigo=getattr(r, "estado_flujo_codigo", None),
             estado_flujo_nombre=getattr(r, "estado_flujo_nombre", None),
 
@@ -345,6 +345,7 @@ def buscar_expedientes(db: Session, payload: ExpedienteSearchRequest) -> Expedie
     ]
 
     return ExpedienteSearchResponse(data=data, page=payload.page, limit=payload.limit, total=total)
+
 
 def listar_documentos_expediente(db: Session, expediente_id: int, tab: str) -> List[Dict[str, Any]]:
     tab = validar_tab(tab)
@@ -387,7 +388,7 @@ def listar_documentos_expediente(db: Session, expediente_id: int, tab: str) -> L
 
 
 # =====================================================
-# UPLOADS (router leerá bytes; service actualiza DB)
+# UPLOADS
 # =====================================================
 
 def _validate_file_bytes(content: bytes) -> int:
@@ -425,27 +426,16 @@ def upload_documento_por_id_core(
     mime = content_type or "application/octet-stream"
     checksum = hashlib.sha256(content).hexdigest()
 
-    # --- [CAMBIO INTEGRACION MINIO] Inicio de lógica de carga real ---
-    # Antes se usaba: ftp_key = build_placeholder_ftp_key(expediente_id, documento_id, filename)
-    # Ahora subimos a MinIO:
-
     try:
         bucket_name = os.getenv("MINIO_BUCKET", "almacenamiento-mis")
-        
-        # Sanitizar nombre de archivo y construir ruta lógica
         safe_filename = filename.replace(" ", "_")
-        # Ruta: expedientes/{id}/{tab}/reemplazos/{filename}
-        # Nota: Usamos 'reemplazos' o directo el ID si prefieres mantener historial, 
-        # aquí mantenemos la estructura simple.
         storage_key = f"expedientes/{expediente_id}/{doc.tab.lower()}/upd_{doc.id}_{safe_filename}"
-        
-        if not minio_client:
-             raise HTTPException(status_code=500, detail="Servicio de almacenamiento no disponible")
 
-        # Preparar stream
+        if not minio_client:
+            raise HTTPException(status_code=500, detail="Servicio de almacenamiento no disponible")
+
         data_stream = io.BytesIO(content)
-        
-        # Subir a MinIO
+
         minio_client.put_object(
             bucket_name,
             storage_key,
@@ -453,8 +443,7 @@ def upload_documento_por_id_core(
             length=size,
             content_type=mime
         )
-        
-        # Asignar valores reales para la BD
+
         doc.storage_provider = "MINIO"
         doc.storage_key = storage_key
         doc.estado = "ADJUNTADO"
@@ -462,8 +451,6 @@ def upload_documento_por_id_core(
     except Exception as e:
         print(f"Error subiendo documento por ID a MinIO: {e}")
         raise HTTPException(status_code=500, detail="Error guardando el archivo físico en el servidor.")
-    
-    # --- [CAMBIO INTEGRACION MINIO] Fin de lógica de carga ---
 
     doc.filename = filename
     doc.mime_type = mime
@@ -473,6 +460,18 @@ def upload_documento_por_id_core(
     doc.observacion = observacion
     doc.descripcion = descripcion
     doc.updated_at = datetime.utcnow()
+
+    # ✅ TRACKING IMPORTANTE: documentos subidos
+    TrackingEventoService._registrar(
+        db,
+        expediente_id=int(expediente_id),
+        titulo="Documentos subidos",
+        origen=TrackingEventoService.ORIGEN_DOCUMENTOS,
+        tipo_evento=TrackingEventoService.DOCS_SUBIDOS,
+        usuario=None,
+        observacion=f"{doc.tab} | DocID {doc.id} | {filename}",
+        commit=False,
+    )
 
     db.commit()
     db.refresh(doc)
@@ -492,7 +491,6 @@ def upload_documento_por_id_core(
         "checksum_sha256": doc.checksum_sha256,
         "updated_at": doc.updated_at,
     }
-
 
 def upload_documento_por_tipo_core(
     db: Session,
@@ -540,26 +538,17 @@ def upload_documento_por_tipo_core(
         db.add(doc)
         db.flush()
 
-    # --- [CAMBIO INTEGRACION MINIO] Inicio de lógica de carga real ---
-    # Antes se usaba: ftp_key = build_placeholder_ftp_key(...)
-    # Ahora subimos a MinIO:
-
     try:
         bucket_name = os.getenv("MINIO_BUCKET", "almacenamiento-mis")
-        
-        # Construcción de ruta lógica: expedientes/{id}/{tab}/{codigo_tipo}_{filename}
         safe_filename = filename.replace(" ", "_")
-        # Usamos el código del tipo de documento para orden (ej: DPI_MADRE_foto.jpg)
         codigo_prefix = tipo.codigo if tipo.codigo else f"T{tipo_documento_id}"
         storage_key = f"expedientes/{expediente_id}/{tab.lower()}/{codigo_prefix}_{safe_filename}"
-        
-        if not minio_client:
-             raise HTTPException(status_code=500, detail="Servicio de almacenamiento no disponible")
 
-        # Preparar stream de bytes
+        if not minio_client:
+            raise HTTPException(status_code=500, detail="Servicio de almacenamiento no disponible")
+
         data_stream = io.BytesIO(content)
-        
-        # Ejecutar subida (put_object)
+
         minio_client.put_object(
             bucket_name,
             storage_key,
@@ -567,18 +556,14 @@ def upload_documento_por_tipo_core(
             length=size,
             content_type=mime
         )
-        
-        # Asignar punteros reales a la BD
+
         doc.storage_provider = "MINIO"
         doc.storage_key = storage_key
         doc.estado = "ADJUNTADO"
 
     except Exception as e:
         print(f"Error subiendo documento por TIPO a MinIO: {e}")
-        # En caso de fallo crítico de IO, reportamos error 500
         raise HTTPException(status_code=500, detail="Error guardando el archivo físico en el servidor.")
-
-    # --- [CAMBIO INTEGRACION MINIO] Fin de lógica de carga ---
 
     doc.filename = filename
     doc.mime_type = mime
@@ -588,6 +573,18 @@ def upload_documento_por_tipo_core(
     doc.observacion = observacion
     doc.descripcion = descripcion
     doc.updated_at = datetime.utcnow()
+
+    # ✅ TRACKING IMPORTANTE: documentos subidos
+    TrackingEventoService._registrar(
+        db,
+        expediente_id=int(expediente_id),
+        titulo="Documentos subidos",
+        origen=TrackingEventoService.ORIGEN_DOCUMENTOS,
+        tipo_evento=TrackingEventoService.DOCS_SUBIDOS,
+        usuario=None,
+        observacion=f"{tab} | Tipo {tipo.codigo or tipo_documento_id} | {filename}",
+        commit=False,
+    )
 
     db.commit()
     db.refresh(doc)
@@ -616,20 +613,17 @@ def upload_documento_por_tipo_core(
 def crear_tracking_evento_core(db: Session, expediente_id: int, payload: TrackingCreate) -> TrackingEvento:
     _assert_expediente_exists(db, expediente_id)
 
-    evento = TrackingEvento(
+    # ✅ Un solo patrón (igual que el resto)
+    return TrackingEventoService._registrar(
+        db,
         expediente_id=expediente_id,
-        fecha_evento=payload.fecha_evento or datetime.utcnow(),
         titulo=payload.titulo,
-        usuario=payload.usuario,
-        observacion=payload.observacion,
         origen=payload.origen,
         tipo_evento=payload.tipo_evento,
+        usuario=payload.usuario,
+        observacion=payload.observacion,
+        commit=True,
     )
-
-    db.add(evento)
-    db.commit()
-    db.refresh(evento)
-    return evento
 
 
 def listar_tracking_expediente_core(db: Session, expediente_id: int) -> List[TrackingEvento]:
@@ -649,6 +643,22 @@ def set_expediente_bpm_minimo_core(
     expediente_id: int,
     spiff_instance: dict,
 ) -> None:
+
+    # ✅ Leer correctamente desde process_instance
+    pi = spiff_instance.get("process_instance") or {}
+
+    iid = pi.get("id")
+    status = pi.get("status")
+    milestone = pi.get("last_milestone_bpmn_name")
+    pkey = pi.get("process_model_identifier")
+
+    # ✅ Nunca convertir None a string
+    if iid is not None:
+        try:
+            iid = int(iid)
+        except Exception:
+            iid = None
+
     db.execute(
         text("""
             UPDATE expediente_electronico
@@ -663,10 +673,10 @@ def set_expediente_bpm_minimo_core(
         """),
         {
             "eid": expediente_id,
-            "iid": str(spiff_instance.get("id")),
-            "st": spiff_instance.get("status"),
-            "task": spiff_instance.get("last_milestone_bpmn_name"),
-            "pkey": spiff_instance.get("process_model_identifier"),
+            "iid": iid,  # ✅ ahora es int o None real
+            "st": status,
+            "task": milestone,
+            "pkey": pkey,
             "sync_at": datetime.utcnow(),
             "upd_at": datetime.utcnow(),
         },
@@ -675,10 +685,16 @@ def set_expediente_bpm_minimo_core(
 def actualizar_titular_y_estado_flujo(
     db: Session,
     expediente_id: int,
-    titular_nombre: str,
-    titular_dpi: str,
+    titular_nombre: str | None,
+    titular_dpi: str | None,
+    personalizado: bool = False,
 ):
-    # 1) Obtener el estado TITULAR_CARGADO
+    estado_codigo = (
+        "TITULAR_PERSONALIZADO_PENDIENTE"
+        if personalizado
+        else ESTADO_FLUJO_TITULAR_CARGADO
+    )
+
     estado = db.execute(
         text("""
             SELECT id, codigo, nombre
@@ -687,33 +703,62 @@ def actualizar_titular_y_estado_flujo(
               AND activo = TRUE
             LIMIT 1
         """),
-        {"codigo": ESTADO_FLUJO_TITULAR_CARGADO},
+        {"codigo": estado_codigo},
     ).mappings().first()
 
     if not estado:
-        raise ValueError("Estado de flujo TITULAR_CARGADO no existe o está inactivo")
+        raise ValueError(f"Estado de flujo {estado_codigo} no existe o está inactivo")
 
-    # 2) Actualizar expediente
-    row = db.execute(
-        text("""
-            UPDATE expediente_electronico
-               SET titular_nombre = :titular_nombre,
-                   titular_dpi = :titular_dpi,
-                   estado_flujo_id = :estado_flujo_id,
-                   updated_at = NOW()
-             WHERE id = :id
-         RETURNING id, titular_nombre, titular_dpi, estado_flujo_id
-        """),
-        {
-            "id": expediente_id,
-            "titular_nombre": titular_nombre.strip(),
-            "titular_dpi": titular_dpi.strip(),
-            "estado_flujo_id": estado["id"],
-        },
-    ).mappings().first()
+    if not personalizado:
+        if not titular_nombre or not titular_dpi:
+            raise ValueError("Nombre y DPI del titular son requeridos.")
+
+        row = db.execute(
+            text("""
+                UPDATE expediente_electronico
+                   SET titular_nombre = :titular_nombre,
+                       titular_dpi = :titular_dpi,
+                       estado_flujo_id = :estado_flujo_id,
+                       updated_at = NOW()
+                 WHERE id = :id
+             RETURNING id, titular_nombre, titular_dpi, estado_flujo_id
+            """),
+            {
+                "id": expediente_id,
+                "titular_nombre": titular_nombre.strip(),
+                "titular_dpi": titular_dpi.strip(),
+                "estado_flujo_id": estado["id"],
+            },
+        ).mappings().first()
+    else:
+        row = db.execute(
+            text("""
+                UPDATE expediente_electronico
+                   SET estado_flujo_id = :estado_flujo_id,
+                       updated_at = NOW()
+                 WHERE id = :id
+             RETURNING id, titular_nombre, titular_dpi, estado_flujo_id
+            """),
+            {
+                "id": expediente_id,
+                "estado_flujo_id": estado["id"],
+            },
+        ).mappings().first()
 
     if not row:
         return None
+
+    # ✅ TRACKING IMPORTANTE: titular cargado / actualizado
+    TrackingEventoService._registrar(
+        db,
+        expediente_id=int(expediente_id),
+        titulo="Titular cargado" if not personalizado else "Titular personalizado pendiente",
+        origen=TrackingEventoService.ORIGEN_EXPEDIENTE,
+        tipo_evento="TITULAR_CARGADO" if not personalizado else "TITULAR_PERSONALIZADO_PENDIENTE",
+        usuario=None,
+        observacion=(f"{titular_nombre or ''} | {titular_dpi or ''}" if not personalizado else None),
+        commit=False,
+    )
 
     db.commit()
 
@@ -727,7 +772,6 @@ def actualizar_titular_y_estado_flujo(
     }
 
 def confirmar_documentos_cargados(db: Session, expediente_id: int):
-    # 1) Resolver estado destino
     estado = db.execute(
         text("""
             SELECT id, codigo, nombre
@@ -741,17 +785,6 @@ def confirmar_documentos_cargados(db: Session, expediente_id: int):
     if not estado:
         raise ValueError("Estado de flujo DOCS_CARGADOS no existe o está inactivo")
 
-    # 2) (Opcional) Validación mínima (si quieres bloquear avanzar sin docs)
-    #    Si ya tienes validación en otro lugar, déjalo comentado:
-    #
-    # has_docs = db.execute(
-    #     text("SELECT 1 FROM documentos_y_anexos WHERE expediente_id = :id LIMIT 1"),
-    #     {"id": expediente_id},
-    # ).first()
-    # if not has_docs:
-    #     raise ValueError("No hay documentos vinculados para confirmar")
-
-    # 3) Actualizar expediente
     row = db.execute(
         text("""
             UPDATE expediente_electronico
@@ -766,6 +799,18 @@ def confirmar_documentos_cargados(db: Session, expediente_id: int):
     if not row:
         return None
 
+    # ✅ EVENTO IMPORTANTE (hito): confirmación de carga (diferente a “subidos”)
+    TrackingEventoService._registrar(
+        db,
+        expediente_id=int(expediente_id),
+        titulo="Documentos cargados confirmados",
+        origen=TrackingEventoService.ORIGEN_DOCUMENTOS,
+        tipo_evento="DOCS_CARGADOS_CONFIRMADOS",
+        usuario=None,
+        observacion=None,
+        commit=False,
+    )
+
     db.commit()
 
     return {
@@ -774,7 +819,6 @@ def confirmar_documentos_cargados(db: Session, expediente_id: int):
         "estado_flujo_codigo": estado["codigo"],
         "estado_flujo_nombre": estado["nombre"],
     }
-
 
 def pasar_a_docs_verificados(db: Session, expediente_id: int):
     row = db.execute(
@@ -795,6 +839,18 @@ def pasar_a_docs_verificados(db: Session, expediente_id: int):
 
     if not row:
         return None
+
+    # ✅ TRACKING IMPORTANTE: documentos verificados
+    TrackingEventoService._registrar(
+        db,
+        expediente_id=int(expediente_id),
+        titulo="Documentos verificados",
+        origen=TrackingEventoService.ORIGEN_DOCUMENTOS,
+        tipo_evento=TrackingEventoService.DOCS_VERIFICADOS,
+        usuario=None,
+        observacion=None,
+        commit=False,
+    )
 
     db.commit()
     return dict(row)

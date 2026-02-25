@@ -8,6 +8,7 @@ from app.models.cat_municipio import CatMunicipio
 
 TEMPLATE_PATH = "app/templates/Carta_Aceptacion_Bono_Nutricion.docx"
 
+
 def generar_carta_aceptacion_docx_bytes(expediente_id: int, db: Session) -> tuple[bytes, str]:
     exp = db.query(ExpedienteElectronico).filter_by(id=expediente_id).first()
     if not exp:
@@ -18,25 +19,38 @@ def generar_carta_aceptacion_docx_bytes(expediente_id: int, db: Session) -> tupl
         raise ValueError("Expediente sin información general")
 
     dep = (
-        db.query(CatDepartamento).filter_by(id=ig.departamento_residencia_id).first()
-        if ig.departamento_residencia_id else None
-    )
-    mun = (
-        db.query(CatMunicipio).filter_by(id=ig.municipio_residencia_id).first()
-        if ig.municipio_residencia_id else None
+        db.query(CatDepartamento)
+        .filter_by(id=ig.departamento_residencia_id)
+        .first()
+        if ig.departamento_residencia_id
+        else None
     )
 
+    mun = (
+        db.query(CatMunicipio)
+        .filter_by(id=ig.municipio_residencia_id)
+        .first()
+        if ig.municipio_residencia_id
+        else None
+    )
+
+    # ✅ RUB con fallback seguro
     rub = getattr(exp, "rub", None) or "000000000"
 
+    # ✅ Titular real del expediente (no la madre)
+    titular_nombre = (exp.titular_nombre or "").strip()
+    titular_dpi = (exp.titular_dpi or "").strip()
+
     mapping = {
-        "[NOMBRE DEL TITULAR]": ig.nombre_de_la_madre or "",
-        "[NÚMERO DE CUI DEL TITULAR]": ig.cui_de_la_madre or "",
+        "[NOMBRE DEL TITULAR]": titular_nombre,
+        "[NÚMERO DE CUI DEL TITULAR]": titular_dpi,
         "[MUNICIPIO]": mun.nombre if mun else "",
         "[DEPARTAMENTO]": dep.nombre if dep else "",
         "[Código RUB]": rub,
-        "000000000": rub,  # respaldo por si quedó literal
+        "000000000": rub,  # respaldo si quedó literal en plantilla
     }
 
     docx_bytes = replace_placeholders_docx_bytes(TEMPLATE_PATH, mapping)
     filename = f"Carta_Aceptacion_{rub}.docx"
+
     return docx_bytes, filename

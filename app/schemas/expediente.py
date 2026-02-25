@@ -3,6 +3,8 @@ from typing import Optional, List, Any, Dict
 from datetime import date, datetime
 from enum import Enum
 
+from app.schemas.expediente_contacto import ExpedienteContactoOut
+
 
 # =========================
 # INFO GENERAL
@@ -102,6 +104,8 @@ class ExpedienteOut(BaseModel):
 
     info_general: Optional[InfoGeneralOut] = None
 
+    contacto: Optional[ExpedienteContactoOut] = None
+
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -159,5 +163,6 @@ class ExpedienteSearchResponse(BaseModel):
     total: int
 
 class ExpedienteTitularIn(BaseModel):
-    titular_nombre: str = Field(..., min_length=3, max_length=160)
-    titular_dpi: str = Field(..., min_length=6, max_length=32)
+    titular_nombre: Optional[str] = None
+    titular_dpi: Optional[str] = None
+    personalizado: bool = False

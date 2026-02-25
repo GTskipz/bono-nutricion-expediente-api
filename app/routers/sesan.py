@@ -1,6 +1,8 @@
+from datetime import date
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Query
 from sqlalchemy.orm import Session
 
+from app.core.auth import AuthContext, require_auth_context
 from app.core.db import get_db
 from app.services.sesan_service import SesanService
 
@@ -30,13 +32,25 @@ def crear_batch_sesan(
 
 
 @router.get("/batches")
-def listar_batches_por_anio(
+def listar_batches(
     anio: int = Query(...),
+    mes: int | None = Query(None, ge=1, le=12),
+    estado: str | None = Query(None),
+    fecha_inicio: date | None = Query(None),
+    fecha_fin: date | None = Query(None),
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
-    return SesanService(db).listar_batches_por_anio(anio=anio, page=page, limit=limit)
+    return SesanService(db).listar_batches(
+        anio=anio,
+        mes=mes,
+        estado=estado,
+        fecha_inicio=fecha_inicio,
+        fecha_fin=fecha_fin,
+        page=page,
+        limit=limit,
+    )
 
 
 @router.get("/anios")
@@ -61,25 +75,25 @@ def listar_filas_batch(
 
 
 @router.post("/batch/{batch_id}/procesar-pendientes")
-async def procesar_pendientes_batch(  # ✅ async
+async def procesar_pendientes_batch(
     batch_id: int,
     limit: int = Query(200, ge=1, le=2000),
     db: Session = Depends(get_db),
+    auth: AuthContext = Depends(require_auth_context),  
 ):
-    return await SesanService(db).procesar_pendientes_batch(  # ✅ await
-        batch_id=batch_id,
-        limit=limit
-    )
+    service = SesanService(db)  # ✅ sin token
+    return await service.procesar_pendientes_batch(batch_id=batch_id, limit=limit)
 
 
 @router.post("/row/{row_id}/procesar")
-async def procesar_row(  # ✅ async
+async def procesar_row(
     row_id: int,
     db: Session = Depends(get_db),
+    auth: AuthContext = Depends(require_auth_context), 
 ):
-    return await SesanService(db).procesar_row(  # ✅ await
-        row_id=row_id
-    )
+    service = SesanService(db=db)  # ✅ sin token
+    return await service.procesar_row(row_id=row_id)
+
 
 
 @router.post("/batch/{batch_id}/reintentar-errores")
@@ -107,3 +121,7 @@ def ignorar_row(
     db: Session = Depends(get_db),
 ):
     return SesanService(db).ignorar_row(row_id=row_id, motivo=motivo, usuario=usuario)
+
+@router.get("/batch/{batch_id}")
+def obtener_detalle_batch(batch_id: int, db: Session = Depends(get_db)):
+    return SesanService(db).obtener_detalle_batch(batch_id)
