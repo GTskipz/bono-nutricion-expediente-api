@@ -10,7 +10,7 @@ import os
 from app.core.minio import minio_client
 
 from fastapi import HTTPException
-from sqlalchemy import func, or_, text
+from sqlalchemy import case, func, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -31,6 +31,9 @@ from app.schemas.expediente import (
     ExpedienteSearchResponse,
     ExpedienteSearchItem,
     BuscarPor,
+    PersonaExpedienteItem,
+    PersonaExpedienteRequest,
+    PersonaExpedienteResponse,
 )
 from app.schemas.tracking_evento import TrackingCreate
 
@@ -346,6 +349,64 @@ def buscar_expedientes(db: Session, payload: ExpedienteSearchRequest) -> Expedie
 
     return ExpedienteSearchResponse(data=data, page=payload.page, limit=payload.limit, total=total)
 
+def buscar_persona_expedientes_service(db: Session, payload: PersonaExpedienteRequest):
+
+    cui = payload.cui.strip()
+
+    q = (
+        db.query(
+            ExpedienteElectronico.id.label("expediente_id"),
+
+            InfoGeneral.anio.label("anio"),
+
+            InfoGeneral.nombre_del_nino.label("nombre_beneficiario"),
+            InfoGeneral.cui_del_nino.label("cui_beneficiario"),
+
+            CatEstadoFlujoExpediente.nombre.label("estado_flujo_nombre"),
+            case(
+                (InfoGeneral.cui_del_nino == cui, "BENEFICIARIO"),
+                (InfoGeneral.cui_de_la_madre == cui, "MADRE"),
+                (InfoGeneral.cui_del_padre == cui, "PADRE"),
+                else_="TITULAR",
+            ).label("rol"),
+        )
+        .join(
+            InfoGeneral,
+            InfoGeneral.expediente_id == ExpedienteElectronico.id,
+        )
+        .outerjoin(
+            CatEstadoFlujoExpediente,
+            CatEstadoFlujoExpediente.id == ExpedienteElectronico.estado_flujo_id,
+        )
+        .filter(
+            or_(
+                InfoGeneral.cui_del_nino == cui,
+                InfoGeneral.cui_de_la_madre == cui,
+                InfoGeneral.cui_del_padre == cui,
+            )
+        )
+        .order_by(ExpedienteElectronico.created_at.desc())
+    )
+
+    rows = q.all()
+
+    data = [
+        PersonaExpedienteItem(
+            expediente_id=r.expediente_id,
+            anio=r.anio,
+            nombre_beneficiario=r.nombre_beneficiario,
+            cui_beneficiario=r.cui_beneficiario,
+            rol=r.rol,
+            estado_flujo_nombre=r.estado_flujo_nombre,
+        )
+        for r in rows
+    ]
+
+    return PersonaExpedienteResponse(
+        cui=cui,
+        total=len(data),
+        expedientes=data,
+    )
 
 def listar_documentos_expediente(db: Session, expediente_id: int, tab: str) -> List[Dict[str, Any]]:
     tab = validar_tab(tab)
@@ -385,7 +446,6 @@ def listar_documentos_expediente(db: Session, expediente_id: int, tab: str) -> L
         }
         for r in rows
     ]
-
 
 # =====================================================
 # UPLOADS

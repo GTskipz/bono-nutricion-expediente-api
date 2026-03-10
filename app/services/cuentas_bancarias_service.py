@@ -1,12 +1,10 @@
-# app/services/cuentas_bancarias_service.py
 from __future__ import annotations
 
-from functools import partial
 from typing import Optional, List, Tuple
 from datetime import datetime
-import anyio
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from io import BytesIO
+import threading
 
 import random
 import string
@@ -20,15 +18,13 @@ from app.models.cat_departamento import CatDepartamento
 from app.models.cat_municipio import CatMunicipio
 from app.models.cat_estado_flujo_expediente import CatEstadoFlujoExpediente
 
-from app.bpm.bpm_service_task_data import BpmServiceTaskData
-
 from app.models.cuentas_bancarias import (
     LoteAperturaCuenta,
     DetalleAperturaCuenta,
     CuentaBancariaExpediente,
 )
 
-# ✅ Tracking por expediente (eventos importantes)
+from app.services.banco_archivo_service import upload_archivo_banco_core
 from app.services.tracking_evento_service import TrackingEventoService
 
 
@@ -45,6 +41,7 @@ def bandeja_expedientes_por_estado_flujo(
     page: int = 1,
     limit: int = 20,
 ):
+
     texto = (texto or "").strip()
     filters = [ExpedienteElectronico.estado_flujo_id == estado_flujo_id]
 
@@ -55,17 +52,14 @@ def bandeja_expedientes_por_estado_flujo(
                 ExpedienteElectronico.cui_beneficiario.like(f"{texto}%"),
             )
         )
+
     if departamento_id:
         filters.append(ExpedienteElectronico.departamento_id == departamento_id)
+
     if municipio_id:
         filters.append(ExpedienteElectronico.municipio_id == municipio_id)
 
-    total = (
-        db.query(func.count(ExpedienteElectronico.id))
-        .filter(*filters)
-        .scalar()
-        or 0
-    )
+    total = db.query(func.count(ExpedienteElectronico.id)).filter(*filters).scalar() or 0
 
     offset = (page - 1) * limit
 
@@ -116,7 +110,7 @@ def bandeja_expedientes_por_estado_flujo(
 
 
 # =========================================================
-# CREAR LOTE + ITEMS (snapshot)
+# CREAR LOTE
 # =========================================================
 def crear_lote_apertura(
     db: Session,
@@ -126,6 +120,7 @@ def crear_lote_apertura(
     observacion: Optional[str] = None,
     proveedor_servicio: Optional[str] = None,
 ) -> Tuple[int, int]:
+
     exp_rows = (
         db.query(
             ExpedienteElectronico.id,
@@ -140,11 +135,6 @@ def crear_lote_apertura(
         .all()
     )
 
-    found_ids = {r.id for r in exp_rows}
-    missing = [i for i in expediente_ids if i not in found_ids]
-    if missing:
-        raise HTTPException(status_code=404, detail=f"Expedientes no encontrados: {missing[:20]}")
-
     lote = LoteAperturaCuenta(
         banco_codigo="BANRURAL",
         estado="CREADO",
@@ -152,6 +142,7 @@ def crear_lote_apertura(
         observacion=observacion,
         proveedor_servicio=proveedor_servicio,
     )
+
     db.add(lote)
     db.flush()
 
@@ -162,33 +153,20 @@ def crear_lote_apertura(
             estado="PENDIENTE",
             cui_beneficiario=r.cui_beneficiario,
             nombre_beneficiario=r.nombre_beneficiario,
-            titular_dpi=r.cui_beneficiario,         # placeholder (ajustar cuando exista tabla contacto/titular real)
-            titular_nombre=r.nombre_beneficiario,   # placeholder
+            titular_dpi=r.cui_beneficiario,
+            titular_nombre=r.nombre_beneficiario,
             departamento=r.departamento,
             municipio=r.municipio,
-            direccion=None,
-            telefono=None,
         )
         db.add(item)
 
-        # ✅ TRACKING IMPORTANTE: intento creación de cuenta (por expediente)
-        TrackingEventoService._registrar(
-            db,
-            expediente_id=int(r.id),
-            titulo="Intento de creación de cuenta bancaria",
-            origen=TrackingEventoService.ORIGEN_CUENTAS,
-            tipo_evento=TrackingEventoService.CUENTA_INTENTO,
-            usuario=creado_por,
-            observacion=f"Lote apertura #{lote.id}",
-            commit=False,
-        )
-
     db.commit()
+
     return lote.id, len(exp_rows)
 
 
 # =========================================================
-# LISTAR LOTES (paginado + filtro año)
+# LISTAR LOTES
 # =========================================================
 def listar_lotes_apertura(
     db: Session,
@@ -199,140 +177,46 @@ def listar_lotes_apertura(
     page: int = 1,
     limit: int = 20,
 ):
+
     texto = (texto or "").strip()
     offset = (page - 1) * limit
 
     q = db.query(LoteAperturaCuenta)
 
-    # filtro año: usa anio si existe, si no usa created_at o creado_en
-    if anio:
-        if hasattr(LoteAperturaCuenta, "anio"):
-            q = q.filter(getattr(LoteAperturaCuenta, "anio") == anio)
-        elif hasattr(LoteAperturaCuenta, "created_at"):
-            q = q.filter(func.extract("year", getattr(LoteAperturaCuenta, "created_at")) == anio)
-        elif hasattr(LoteAperturaCuenta, "creado_en"):
-            q = q.filter(func.extract("year", getattr(LoteAperturaCuenta, "creado_en")) == anio)
-        else:
-            raise HTTPException(status_code=400, detail="No hay columna anio/created_at/creado_en para filtrar por año.")
-
     if estado:
         q = q.filter(LoteAperturaCuenta.estado == estado)
 
-    if texto:
-        conds = []
-        if hasattr(LoteAperturaCuenta, "banco_codigo"):
-            conds.append(LoteAperturaCuenta.banco_codigo.ilike(f"%{texto}%"))
-        if hasattr(LoteAperturaCuenta, "creado_por"):
-            conds.append(LoteAperturaCuenta.creado_por.ilike(f"%{texto}%"))
-        if hasattr(LoteAperturaCuenta, "observacion"):
-            conds.append(LoteAperturaCuenta.observacion.ilike(f"%{texto}%"))
-        if hasattr(LoteAperturaCuenta, "estado"):
-            conds.append(LoteAperturaCuenta.estado.ilike(f"%{texto}%"))
-        if conds:
-            q = q.filter(or_(*conds))
-
     total = q.with_entities(func.count(LoteAperturaCuenta.id)).scalar() or 0
 
-    # orden seguro
-    if hasattr(LoteAperturaCuenta, "created_at"):
-        q = q.order_by(getattr(LoteAperturaCuenta, "created_at").desc())
-    elif hasattr(LoteAperturaCuenta, "creado_en"):
-        q = q.order_by(getattr(LoteAperturaCuenta, "creado_en").desc())
-    else:
-        q = q.order_by(LoteAperturaCuenta.id.desc())
-
     lotes = q.offset(offset).limit(limit).all()
-
-    lote_ids = [l.id for l in lotes]
-    counts_map = {lid: {"total_items": 0, "cuentas_creadas": 0, "rechazados": 0} for lid in lote_ids}
-
-    if lote_ids:
-        agg = (
-            db.query(
-                DetalleAperturaCuenta.lote_id.label("lote_id"),
-                func.count(DetalleAperturaCuenta.id).label("total_items"),
-                func.coalesce(
-                    func.sum(case((DetalleAperturaCuenta.estado == "CUENTA_CREADA", 1), else_=0)),
-                    0,
-                ).label("cuentas_creadas"),
-                func.coalesce(
-                    func.sum(case((DetalleAperturaCuenta.estado == "RECHAZADO", 1), else_=0)),
-                    0,
-                ).label("rechazados"),
-            )
-            .filter(DetalleAperturaCuenta.lote_id.in_(lote_ids))
-            .group_by(DetalleAperturaCuenta.lote_id)
-            .all()
-        )
-        for r in agg:
-            counts_map[r.lote_id] = {
-                "total_items": int(r.total_items or 0),
-                "cuentas_creadas": int(r.cuentas_creadas or 0),
-                "rechazados": int(r.rechazados or 0),
-            }
 
     data = []
     for l in lotes:
         data.append({
             "id": l.id,
-            "banco_codigo": getattr(l, "banco_codigo", None),
-            "estado": getattr(l, "estado", None),
-            "proveedor_servicio": getattr(l, "proveedor_servicio", None),
-            "creado_por": getattr(l, "creado_por", None),
-            "observacion": getattr(l, "observacion", None),
-            "created_at": getattr(l, "created_at", None),
-            "creado_en": getattr(l, "creado_en", None),
-            "procesado_en": getattr(l, "procesado_en", None),
-            "anio": getattr(l, "anio", None) if hasattr(l, "anio") else None,
-            **counts_map.get(l.id, {"total_items": 0, "cuentas_creadas": 0, "rechazados": 0}),
+            "estado": l.estado,
+            "banco_codigo": l.banco_codigo,
+            "creado_en": l.creado_en,
         })
 
     return {"data": data, "page": page, "limit": limit, "total": total}
 
 
 # =========================================================
-# OBTENER DETALLE DE LOTE (resumen)
+# OBTENER LOTE
 # =========================================================
-def obtener_lote_apertura(db: Session, *, lote_id: int) -> dict:
+def obtener_lote_apertura(db: Session, *, lote_id: int):
+
     lote = db.query(LoteAperturaCuenta).filter(LoteAperturaCuenta.id == lote_id).first()
+
     if not lote:
         raise HTTPException(status_code=404, detail="Lote no encontrado")
 
-    agg = (
-        db.query(
-            func.count(DetalleAperturaCuenta.id).label("total_items"),
-            func.coalesce(
-                func.sum(case((DetalleAperturaCuenta.estado == "CUENTA_CREADA", 1), else_=0)),
-                0,
-            ).label("cuentas_creadas"),
-            func.coalesce(
-                func.sum(case((DetalleAperturaCuenta.estado == "RECHAZADO", 1), else_=0)),
-                0,
-            ).label("rechazados"),
-        )
-        .filter(DetalleAperturaCuenta.lote_id == lote_id)
-        .first()
-    )
-
-    return {
-        "id": lote.id,
-        "banco_codigo": getattr(lote, "banco_codigo", None),
-        "estado": getattr(lote, "estado", None),
-        "proveedor_servicio": getattr(lote, "proveedor_servicio", None),
-        "creado_por": getattr(lote, "creado_por", None),
-        "observacion": getattr(lote, "observacion", None),
-        "created_at": getattr(lote, "created_at", None),
-        "creado_en": getattr(lote, "creado_en", None),
-        "procesado_en": getattr(lote, "procesado_en", None),
-        "anio": getattr(lote, "anio", None) if hasattr(lote, "anio") else None,
-        "total_items": int(getattr(agg, "total_items", 0) or 0),
-        "cuentas_creadas": int(getattr(agg, "cuentas_creadas", 0) or 0),
-        "rechazados": int(getattr(agg, "rechazados", 0) or 0),
-    }
+    return lote
 
 
 # =========================================================
-# LISTAR ITEMS DE UN LOTE (paginado)
+# LISTAR ITEMS
 # =========================================================
 def listar_items_lote(
     db: Session,
@@ -341,328 +225,172 @@ def listar_items_lote(
     page: int = 1,
     limit: int = 50,
 ):
-    exists = db.query(LoteAperturaCuenta.id).filter(LoteAperturaCuenta.id == lote_id).first()
-    if not exists:
-        raise HTTPException(status_code=404, detail="Lote no encontrado")
 
     base_q = db.query(DetalleAperturaCuenta).filter(DetalleAperturaCuenta.lote_id == lote_id)
 
-    total = base_q.with_entities(func.count(DetalleAperturaCuenta.id)).scalar() or 0
+    total = base_q.with_entities(func.count(DetalleAperturaCuenta.id)).scalar()
+
     offset = (page - 1) * limit
 
-    items = (
-        base_q.order_by(DetalleAperturaCuenta.id.asc())
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
+    rows = base_q.offset(offset).limit(limit).all()
 
-    data = []
-    for it in items:
-        data.append({
-            "id": it.id,
-            "lote_id": it.lote_id,
-            "expediente_id": it.expediente_id,
-            "estado": getattr(it, "estado", None),
-            "cui_beneficiario": getattr(it, "cui_beneficiario", None),
-            "nombre_beneficiario": getattr(it, "nombre_beneficiario", None),
-            "titular_dpi": getattr(it, "titular_dpi", None),
-            "titular_nombre": getattr(it, "titular_nombre", None),
-            "departamento": getattr(it, "departamento", None),
-            "municipio": getattr(it, "municipio", None),
-            "direccion": getattr(it, "direccion", None),
-            "telefono": getattr(it, "telefono", None),
-            "numero_cuenta": getattr(it, "numero_cuenta", None),
-            "motivo_rechazo": getattr(it, "motivo_rechazo", None),
-
-            # campos nuevos integración
-            "proveedor_servicio": getattr(it, "proveedor_servicio", None),
-            "referencia_externa": getattr(it, "referencia_externa", None),
-            "request_payload": getattr(it, "request_payload", None),
-            "response_payload": getattr(it, "response_payload", None),
-            "response_status_code": getattr(it, "response_status_code", None),
-            "error_servicio": getattr(it, "error_servicio", None),
-            "procesado_en": getattr(it, "procesado_en", None),
-
-            "creado_en": getattr(it, "creado_en", None),
-            "actualizado_en": getattr(it, "actualizado_en", None),
-        })
-
-    return {"data": data, "page": page, "limit": limit, "total": total}
+    return {"data": rows, "page": page, "limit": limit, "total": total}
 
 
 # =========================================================
-# PROCESAR LOTE (SIMULADO) - NUEVO FLUJO (SIN XLSX)
+# LEGACY PROCESAR LOTE
 # =========================================================
 def procesar_lote_apertura_simulado(db: Session, *, lote_id: int) -> dict:
-    """
-    Procesa el lote consultando BPM (Spiff) para verificar resultado bancario.
-    - Consulta task-data por expediente (BpmServiceTaskData)
-    - Si hay cuenta válida => CUENTA_CREADA + upsert CuentaBancariaExpediente + estado_flujo CUENTA_BANCARIA_CREADA
-    - Si NO hay info bancaria => RECHAZADO + tracking error + regresar expediente a DOCS_CARGADOS
-    - Si error técnico consultando BPM => RECHAZADO + tracking error + regresar expediente a DOCS_CARGADOS
-    - Actualiza lote a PROCESADO
-    """
 
-    lote = db.query(LoteAperturaCuenta).filter(LoteAperturaCuenta.id == lote_id).first()
+    total_items = db.query(func.count(DetalleAperturaCuenta.id)).filter(
+        DetalleAperturaCuenta.lote_id == lote_id
+    ).scalar()
+
+    return {
+        "lote_id": lote_id,
+        "total_items": total_items,
+        "cuentas_creadas": 0,
+        "rechazados": 0,
+    }
+
+
+# =========================================================
+# PROCESAR RESPUESTA BANCO
+# =========================================================
+def procesar_respuesta_banco_excel(
+    db: Session,
+    *,
+    lote_id: int,
+    file_bytes: bytes,
+    filename: str,
+):
+
+    lote = (
+        db.query(LoteAperturaCuenta)
+        .filter(LoteAperturaCuenta.id == lote_id)
+        .first()
+    )
+
     if not lote:
         raise HTTPException(status_code=404, detail="Lote no encontrado")
 
-    if getattr(lote, "estado", None) not in ["CREADO", "EXCEL_GENERADO", "RESPUESTA_CARGADA"]:
-        raise HTTPException(status_code=400, detail="El lote no está en un estado válido para procesar")
+    # =====================================================
+    # Guardar archivo en almacenamiento (MinIO)
+    # =====================================================
 
-    items = (
-        db.query(DetalleAperturaCuenta)
-        .filter(DetalleAperturaCuenta.lote_id == lote_id)
-        .order_by(DetalleAperturaCuenta.id.asc())
-        .all()
+    upload_archivo_banco_core(
+        db=db,
+        tipo_operacion="APERTURA_CUENTA",
+        operacion_id=lote_id,
+        tipo_archivo="RESPUESTA",
+        banco_codigo="BANRURAL",
+        filename=filename,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        content=file_bytes,
     )
 
-    total_items = len(items)
+    # =====================================================
+    # Procesar Excel
+    # =====================================================
+
+    wb = load_workbook(BytesIO(file_bytes))
+    ws = wb.active
+
     cuentas_creadas = 0
     rechazados = 0
+    now = datetime.utcnow()
 
-    # precargar estados
     estado_ok = (
         db.query(CatEstadoFlujoExpediente)
         .filter(CatEstadoFlujoExpediente.codigo == "CUENTA_BANCARIA_CREADA")
         .first()
     )
-    estado_error = (
-        db.query(CatEstadoFlujoExpediente)
-        .filter(CatEstadoFlujoExpediente.codigo == "ERROR_CUENTA_BANCARIA")
-        .first()
-    )
-    estado_docs_cargados = (
-        db.query(CatEstadoFlujoExpediente)
-        .filter(CatEstadoFlujoExpediente.codigo == "DOCS_CARGADOS")
-        .first()
-    )
 
-    now = datetime.utcnow()
-    bpm_service = BpmServiceTaskData(db)
+    for row in ws.iter_rows(min_row=2, values_only=True):
 
-    def _safe_get(d, path, default=None):
-        cur = d
-        for k in path:
-            if not isinstance(cur, dict):
-                return default
-            cur = cur.get(k)
-        return cur if cur is not None else default
+        dpi = str(row[10]).strip() if row[10] else None
+        cuenta = str(row[13]).strip() if row[13] else None
 
-    def _extraer_info_banco(task_data_wrapper: dict) -> dict:
-        """
-        task_data_wrapper es lo que retorna BpmServiceTaskData:
-        - por instancia: {"bpm_instance_id":..., "task_guid":..., "data": <task-data-json>}
-        - por expediente: {"expediente_id":..., "bpm_instance_id":..., "task_guid":..., "data": <task-data-json>}
-        En tu ejemplo, el task-data-json trae:
-        data -> { ... "data": { ... variables ... } }
-        y ahí viene: banco.body / datos_banco / respuesta_banco / numero_cuenta_final / fecha_apertura
-        """
-        task_data_json = task_data_wrapper.get("data") or {}
-        variables = _safe_get(task_data_json, ["data"], {})  # <- aquí está el gran "data" de variables
+        if not dpi:
+            continue
 
-        # posibles ubicaciones
-        banco_body = _safe_get(variables, ["banco", "body"], {}) or {}
-        datos_banco = variables.get("datos_banco") or variables.get("respuesta_banco") or {}
-        numero_cuenta = (
-            variables.get("numero_cuenta_final")
-            or datos_banco.get("numeroCuenta")
-            or banco_body.get("numeroCuenta")
+        item = (
+            db.query(DetalleAperturaCuenta)
+            .filter(
+                DetalleAperturaCuenta.lote_id == lote_id,
+                DetalleAperturaCuenta.titular_dpi == dpi,
+            )
+            .first()
         )
-        cuenta_id = datos_banco.get("cuentaId") or banco_body.get("cuentaId")
-        fecha_apertura = (
-            variables.get("fecha_apertura")
-            or datos_banco.get("fechaApertura")
-            or banco_body.get("fechaApertura")
-        )
-        codigo = datos_banco.get("codigo") or banco_body.get("codigo")
-        mensaje = (
-            datos_banco.get("mensaje")
-            or variables.get("mensaje_servicio")
-            or variables.get("estado_apertura")
-            or banco_body.get("mensaje")
-        )
-        exitoso = datos_banco.get("exitoso")
-        if exitoso is None:
-            exitoso = banco_body.get("exitoso")
 
-        return {
-            "exitoso": bool(exitoso) if exitoso is not None else False,
-            "numero_cuenta": numero_cuenta,
-            "cuenta_id": cuenta_id,
-            "fecha_apertura": fecha_apertura,
-            "codigo": codigo,
-            "mensaje": mensaje,
-            "variables": variables,
-            "raw_task_data": task_data_json,
-        }
-
-    for item in items:
-        if (getattr(item, "estado", None) or "").upper() not in ("PENDIENTE", ""):
+        if not item:
             continue
 
         item.procesado_en = now
-        item.proveedor_servicio = getattr(lote, "proveedor_servicio", None) or "BPM_SPIFF"
-        item.actualizado_en = now
 
-        # request_payload real (auditoría)
-        item.request_payload = {
-            "expediente_id": item.expediente_id,
-            "cui": item.cui_beneficiario,
-            "titular_dpi": item.titular_dpi,
-            "lote_id": lote.id,
-            "tipo": "CONSULTA_BPM_TASK_DATA_BANCO",
-        }
+        if cuenta:
 
-        try:
-            # 🔥 Consulta BPM (async) desde función sync
-            task_data_wrapper = anyio.run(
-                partial(bpm_service.obtener_task_data_por_expediente_id, expediente_id=int(item.expediente_id))
+            item.estado = "CUENTA_CREADA"
+            item.numero_cuenta = cuenta
+
+            db.add(
+                CuentaBancariaExpediente(
+                    expediente_id=item.expediente_id,
+                    banco_codigo="BANRURAL",
+                    numero_cuenta=cuenta,
+                    titular_dpi=item.titular_dpi,
+                    titular_nombre=item.titular_nombre,
+                    detalle_apertura_id=item.id,
+                )
             )
 
-            info = _extraer_info_banco(task_data_wrapper)
+            if estado_ok:
+                db.query(ExpedienteElectronico).filter(
+                    ExpedienteElectronico.id == item.expediente_id
+                ).update({"estado_flujo_id": estado_ok.id})
 
-            # guardar respuesta completa para auditoría
-            item.response_payload = task_data_wrapper
-            item.response_status_code = 200
-            item.referencia_externa = info.get("cuenta_id") or task_data_wrapper.get("task_guid")
+            cuentas_creadas += 1
 
-            # ✅ Éxito si hay número y exitoso
-            if info["exitoso"] and info["numero_cuenta"]:
-                numero_cuenta = str(info["numero_cuenta"]).strip()
-
-                item.estado = "CUENTA_CREADA"
-                item.numero_cuenta = numero_cuenta
-                item.motivo_rechazo = None
-                item.error_servicio = None
-
-                cuentas_creadas += 1
-
-                # upsert en cuenta_bancaria_expediente
-                existing = (
-                    db.query(CuentaBancariaExpediente)
-                    .filter(CuentaBancariaExpediente.expediente_id == item.expediente_id)
-                    .first()
-                )
-                if existing:
-                    existing.numero_cuenta = numero_cuenta
-                    existing.titular_dpi = item.titular_dpi
-                    existing.titular_nombre = item.titular_nombre
-                    existing.detalle_apertura_id = item.id
-                    existing.cuenta_asignada_en = now
-                    existing.banco_codigo = getattr(lote, "banco_codigo", None) or existing.banco_codigo
-                else:
-                    db.add(
-                        CuentaBancariaExpediente(
-                            expediente_id=item.expediente_id,
-                            banco_codigo=getattr(lote, "banco_codigo", None) or "BANRURAL",
-                            numero_cuenta=numero_cuenta,
-                            titular_dpi=item.titular_dpi,
-                            titular_nombre=item.titular_nombre,
-                            detalle_apertura_id=item.id,
-                        )
-                    )
-
-                # actualizar estado del expediente => CUENTA_BANCARIA_CREADA
-                if estado_ok:
-                    db.query(ExpedienteElectronico).filter(
-                        ExpedienteElectronico.id == item.expediente_id
-                    ).update({"estado_flujo_id": estado_ok.id})
-
-                TrackingEventoService._registrar(
-                    db,
-                    expediente_id=int(item.expediente_id),
-                    titulo="Cuenta bancaria verificada",
-                    origen=TrackingEventoService.ORIGEN_CUENTAS,
-                    tipo_evento=TrackingEventoService.CUENTA_CREADA,
-                    usuario=getattr(lote, "creado_por", None),
-                    observacion=f"Lote apertura #{lote.id} | Cuenta: {numero_cuenta}",
-                    commit=False,
-                )
-
-            else:
-                # ❌ No hay info bancaria válida -> error negocio
-                item.estado = "RECHAZADO"
-                item.numero_cuenta = None
-                item.motivo_rechazo = "SIN_INFO_BANCARIA_EN_BPM"
-                item.error_servicio = "SIN_INFO_BANCARIA_EN_BPM"
-
-                rechazados += 1
-
-                # 🔁 regresar expediente a DOCS_CARGADOS (regla tuya)
-                if estado_docs_cargados:
-                    db.query(ExpedienteElectronico).filter(
-                        ExpedienteElectronico.id == item.expediente_id
-                    ).update({"estado_flujo_id": estado_docs_cargados.id})
-                elif estado_error:
-                    # fallback si no existe DOCS_CARGADOS en catálogo
-                    db.query(ExpedienteElectronico).filter(
-                        ExpedienteElectronico.id == item.expediente_id
-                    ).update({"estado_flujo_id": estado_error.id})
-
-                TrackingEventoService._registrar(
-                    db,
-                    expediente_id=int(item.expediente_id),
-                    titulo="No se recibió información bancaria desde BPM",
-                    origen=TrackingEventoService.ORIGEN_CUENTAS,
-                    tipo_evento=TrackingEventoService.CUENTA_ERROR,
-                    usuario=getattr(lote, "creado_por", None),
-                    observacion=f"Lote #{lote.id} | Regreso a DOCS_CARGADOS",
-                    commit=False,
-                )
-
-        except Exception as e:
-            # ❌ Error técnico consultando BPM -> regresar a DOCS_CARGADOS
-            TrackingEventoService._registrar(
-                db,
-                expediente_id=int(item.expediente_id),
-                titulo="Error técnico consultando BPM para verificación bancaria",
-                origen=TrackingEventoService.ORIGEN_CUENTAS,
-                tipo_evento=TrackingEventoService.CUENTA_ERROR,
-                usuario=getattr(lote, "creado_por", None),
-                observacion=str(e)[:500],
-                commit=False,
-            )
+        else:
 
             item.estado = "RECHAZADO"
-            item.numero_cuenta = None
-            item.motivo_rechazo = "ERROR_TECNICO_BPM"
-            item.response_payload = {"error": "ERROR_TECNICO_BPM", "detail": str(e)[:500]}
-            item.response_status_code = 500
-            item.error_servicio = "ERROR_TECNICO_BPM"
-            item.referencia_externa = item.referencia_externa or f"BPM-{item.id}"
-            item.procesado_en = now
-            item.actualizado_en = now
-
             rechazados += 1
 
-            if estado_docs_cargados:
-                db.query(ExpedienteElectronico).filter(
-                    ExpedienteElectronico.id == item.expediente_id
-                ).update({"estado_flujo_id": estado_docs_cargados.id})
-            elif estado_error:
-                db.query(ExpedienteElectronico).filter(
-                    ExpedienteElectronico.id == item.expediente_id
-                ).update({"estado_flujo_id": estado_error.id})
+    # =====================================================
+    # Actualizar lote
+    # =====================================================
 
-    # estado del lote
     lote.estado = "PROCESADO"
     lote.procesado_en = now
-    if getattr(lote, "proveedor_servicio", None) is None:
-        lote.proveedor_servicio = "BPM_SPIFF"
 
     db.commit()
 
+    # =====================================================
+    # Hilo BPM (placeholder)
+    # =====================================================
+
+    threading.Thread(
+        target=_spiff_placeholder,
+        args=(lote_id,),
+        daemon=True,
+    ).start()
+
     return {
         "lote_id": lote_id,
-        "total_items": total_items,
         "cuentas_creadas": cuentas_creadas,
         "rechazados": rechazados,
     }
 
+def _spiff_placeholder(lote_id: int):
+    pass
+
+
 def generar_excel_lote_export_bytes(db: Session, *, lote_id: int) -> bytes:
-    lote = db.query(LoteAperturaCuenta).filter(LoteAperturaCuenta.id == lote_id).first()
+
+    lote = db.query(LoteAperturaCuenta).filter(
+        LoteAperturaCuenta.id == lote_id
+    ).first()
+
     if not lote:
         raise HTTPException(status_code=404, detail="Lote no encontrado")
 
@@ -675,96 +403,148 @@ def generar_excel_lote_export_bytes(db: Session, *, lote_id: int) -> bytes:
 
     wb = Workbook()
     ws = wb.active
-    ws.title = "LOTE_EXPORT"
+    ws.title = "APERTURA_CUENTAS"
 
     headers = [
-        "lote_id",
-        "banco_codigo",
-        "estado_lote",
-        "proveedor_servicio_lote",
-        "creado_en",
-        "procesado_en_lote",
-
-        "item_id",
-        "expediente_id",
-        "estado_item",
-
-        "cui_beneficiario",
-        "nombre_beneficiario",
-        "titular_dpi",
-        "titular_nombre",
-        "departamento",
-        "municipio",
-        "direccion",
-        "telefono",
-
-        "numero_cuenta",
-        "motivo_rechazo",
-
-        "proveedor_servicio_item",
-        "referencia_externa",
-        "response_status_code",
-        "error_servicio",
-        "procesado_en_item",
-        "actualizado_en",
+        "No.",
+        "Cod Usuario",
+        "Cod Integrante",
+        "Primer nombre",
+        "Segundo nombre",
+        "Tercer nombre",
+        "Primer apellido",
+        "Segundo apellido",
+        "Apellido de casada(o)",
+        "No. Orden",
+        "Numero de Registro",
+        "Genero MF",
+        "Direccion Domiciliar",
+        "CUENTA",
+        "DEPTO",
+        "MUNICIPIO",
     ]
+
     ws.append(headers)
 
-    for it in items:
+    contador = 1
+
+    for item in items:
+
+        partes = (item.titular_nombre or "").strip().split()
+
+        primer_nombre = ""
+        segundo_nombre = ""
+        tercer_nombre = ""
+        primer_apellido = ""
+        segundo_apellido = ""
+
+        if len(partes) == 4:
+            primer_nombre = partes[0]
+            segundo_nombre = partes[1]
+            primer_apellido = partes[2]
+            segundo_apellido = partes[3]
+
+        elif len(partes) >= 5:
+            primer_nombre = partes[0]
+            segundo_nombre = partes[1]
+            tercer_nombre = partes[2]
+            primer_apellido = partes[3]
+            segundo_apellido = partes[4]
+
+        elif len(partes) == 3:
+            primer_nombre = partes[0]
+            segundo_nombre = partes[1]
+            primer_apellido = partes[2]
+
+        elif len(partes) == 2:
+            primer_nombre = partes[0]
+            primer_apellido = partes[1]
+
+        elif len(partes) == 1:
+            primer_nombre = partes[0]
+
         ws.append([
-            lote.id,
-            getattr(lote, "banco_codigo", None),
-            getattr(lote, "estado", None),
-            getattr(lote, "proveedor_servicio", None),
-            getattr(lote, "creado_en", None),
-            getattr(lote, "procesado_en", None),
+            contador,
 
-            it.id,
-            it.expediente_id,
-            getattr(it, "estado", None),
+            "",  # Cod Usuario
+            "",  # Cod Integrante
 
-            it.cui_beneficiario,
-            it.nombre_beneficiario,
-            it.titular_dpi,
-            it.titular_nombre,
-            it.departamento,
-            it.municipio,
-            it.direccion,
-            it.telefono,
+            primer_nombre,
+            segundo_nombre,
+            tercer_nombre,
 
-            it.numero_cuenta,
-            it.motivo_rechazo,
+            primer_apellido,
+            segundo_apellido,
 
-            getattr(it, "proveedor_servicio", None),
-            getattr(it, "referencia_externa", None),
-            getattr(it, "response_status_code", None),
-            getattr(it, "error_servicio", None),
-            getattr(it, "procesado_en", None),
-            getattr(it, "actualizado_en", None),
+            "",  # Apellido casada
+
+            "DPI",
+            item.titular_dpi or "",
+
+            "",  # genero
+
+            item.direccion or "",
+            "",  # cuenta
+
+            item.departamento or "",
+            item.municipio or "",
         ])
 
-    buf = BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return buf.getvalue()
+        contador += 1
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+
+    return buffer.getvalue()
 
 
-# =========================================================
-# DEPRECADO (referencia) - EXCEL SOLICITUD / XLSX RESPUESTA
-# =========================================================
-"""
-# -----------------------------
-# GENERAR EXCEL SOLICITUD (stream)  [DEPRECADO]
-# -----------------------------
-from openpyxl import Workbook
-from io import BytesIO
+def validar_excel_respuesta_banco(file_bytes: bytes):
 
-def generar_excel_solicitud_bytes(db: Session, *, lote_id: int) -> bytes:
-    ...
+    try:
+        wb = load_workbook(BytesIO(file_bytes), data_only=True)
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="El archivo Excel no es válido o está corrupto."
+        )
 
-# -----------------------------
-# PROCESAR RESPUESTA DEL BANCO XLSX [DEPRECADO]
-# -----------------------------
-def procesar_respuesta_banco_xlsx(db: Session, *, lote_id: int, file_bytes: bytes) -> dict:
-    ...
-"""
+    ws = wb.active
+
+    if ws.max_row < 2:
+        raise HTTPException(
+            status_code=400,
+            detail="El archivo Excel no contiene registros."
+        )
+
+    headers = []
+
+    for cell in ws[1]:
+        if cell.value:
+            headers.append(str(cell.value).strip().upper())
+        else:
+            headers.append("")
+
+    columnas_requeridas = [
+        "PRIMER NOMBRE",
+        "SEGUNDO NOMBRE",
+        "TERCER NOMBRE",
+        "PRIMER APELLIDO",
+        "SEGUNDO APELLIDO",
+        "APELLIDO DE CASADA(O)",
+        "CUENTA",
+    ]
+
+    faltantes = []
+
+    for col in columnas_requeridas:
+        if col not in headers:
+            faltantes.append(col)
+
+    if faltantes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"El archivo Excel no contiene las columnas requeridas: {', '.join(faltantes)}"
+        )
+
+    return True

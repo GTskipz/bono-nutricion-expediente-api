@@ -166,3 +166,21 @@ class ExpedienteTitularIn(BaseModel):
     titular_nombre: Optional[str] = None
     titular_dpi: Optional[str] = None
     personalizado: bool = False
+
+class PersonaExpedienteItem(BaseModel):
+    expediente_id: int
+    anio: str | None
+    nombre_beneficiario: str | None
+    cui_beneficiario: str | None
+    rol: str
+    estado_flujo_nombre: str | None
+
+
+class PersonaExpedienteResponse(BaseModel):
+    cui: str
+    total: int
+    expedientes: list[PersonaExpedienteItem]
+
+
+class PersonaExpedienteRequest(BaseModel):
+    cui: str

@@ -1,5 +1,6 @@
 from datetime import date
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.core.auth import AuthContext, require_auth_context
@@ -95,7 +96,6 @@ async def procesar_row(
     return await service.procesar_row(row_id=row_id)
 
 
-
 @router.post("/batch/{batch_id}/reintentar-errores")
 def reintentar_errores_batch(
     batch_id: int,
@@ -125,3 +125,26 @@ def ignorar_row(
 @router.get("/batch/{batch_id}")
 def obtener_detalle_batch(batch_id: int, db: Session = Depends(get_db)):
     return SesanService(db).obtener_detalle_batch(batch_id)
+
+@router.delete("/lotes/{lote_id}")
+def eliminar_lote(lote_id: int, db: SesanService = Depends(get_db)):
+    return SesanService(db).eliminar_lote(lote_id)
+
+@router.get("/plantilla")
+def descargar_plantilla(db: SesanService = Depends(get_db)):
+    file_stream = SesanService(db).generar_plantilla_sesan()
+
+    return StreamingResponse(
+        file_stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": "attachment; filename=plantilla_sesan.xlsx"
+        },
+    )
+
+@router.get("/batch/{batch_id}/totales")
+def obtener_totales_batch(
+    batch_id: int,
+    db: SesanService = Depends(get_db),
+):
+    return SesanService(db).obtener_totales_batch(batch_id)

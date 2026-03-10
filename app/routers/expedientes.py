@@ -20,11 +20,14 @@ from app.schemas.expediente import (
     ExpedienteOut,
     ExpedienteSearchRequest,
     ExpedienteSearchResponse,
-    ExpedienteTitularIn
+    ExpedienteTitularIn,
+    PersonaExpedienteRequest,
+    PersonaExpedienteResponse
 )
 from app.schemas.tracking_evento import TrackingCreate, TrackingOut
 
 from app.services.expedientes_service import (
+    buscar_persona_expedientes_service,
     crear_expediente_core,
     obtener_expediente,
     obtener_expediente_detalle,
@@ -298,3 +301,10 @@ def guardar_contacto(
         raise HTTPException(status_code=404, detail="Expediente no encontrado")
 
     return row
+
+@router.post("/search-persona", response_model=PersonaExpedienteResponse)
+def buscar_persona_expedientes(
+    payload: PersonaExpedienteRequest,
+    db: Session = Depends(get_db),
+):
+    return buscar_persona_expedientes_service(db, payload)

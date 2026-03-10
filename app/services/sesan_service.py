@@ -4,6 +4,7 @@ from __future__ import annotations
 import os   # Agregado para variables de entorno
 import io   # Agregado para manejo de streams de bytes
 from fastapi import HTTPException, UploadFile
+from openpyxl import Workbook
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from datetime import date, datetime
@@ -723,7 +724,11 @@ class SesanService:
     ):
         offset = (page - 1) * limit
 
-        where = ["anio_carga = :anio"]
+        where = [
+            "anio_carga = :anio",
+            "estado <> 'ELIMINADO'"
+        ]
+
         params: dict = {"anio": anio, "offset": offset, "limit": limit}
 
         # mes
@@ -1126,7 +1131,6 @@ class SesanService:
     # =====================================================
     # CONSULTA DETALLE BATCH
     # =====================================================
-
     def obtener_batch(self, batch_id: int) -> dict:
         row = self.db.execute(
             text("""
@@ -1162,7 +1166,6 @@ class SesanService:
             raise HTTPException(status_code=404, detail="Batch no encontrado.")
 
         return dict(row)
-
 
     def listar_documentos_batch(self, batch_id: int) -> list[dict]:
         rows = self.db.execute(
@@ -1205,7 +1208,6 @@ class SesanService:
 
         return [dict(r) for r in rows]
 
-
     def obtener_detalle_batch(self, batch_id: int) -> dict:
         batch = self.obtener_batch(batch_id)
         documentos = self.listar_documentos_batch(batch_id)
@@ -1214,3 +1216,110 @@ class SesanService:
             "batch": batch,
             "documentos": documentos,
         }
+
+    def eliminar_lote(self, lote_id: int):
+        # 1️⃣ Buscar el lote
+        lote = self.db.execute(
+            text("""
+                SELECT id, estado
+                FROM sesan_batch
+                WHERE id = :id
+            """),
+            {"id": lote_id},
+        ).mappings().first()
+
+        if not lote:
+            raise ValueError("El lote no existe")
+
+        # 2️⃣ Validar estado
+        if (lote["estado"] or "").upper() != "EN_REVISION":
+            raise ValueError(
+                "Solo se pueden eliminar lotes en estado CARGADO"
+            )
+
+        # 3️⃣ Soft delete
+        self.db.execute(
+            text("""
+                UPDATE sesan_batch
+                SET estado = 'ELIMINADO',
+                    updated_at = NOW()
+                WHERE id = :id
+            """),
+            {"id": lote_id},
+        )
+
+        # 4️⃣ Confirmar transacción
+        self.db.commit()
+
+        return {
+            "message": "Lote eliminado correctamente",
+            "id": lote_id,
+        }
+    
+    def generar_plantilla_sesan(self):
+        headers = [
+            "#",
+            "AÑO",
+            "MES",
+            "ÁREA DE SALUD",
+            "DISTRITO DE SALUD",
+            "SERVICIO DE SALUD",
+            "DEPARTAMENTO DE RESIDENCIA",
+            "MUNICIPIO DE RESIDENCIA",
+            "COMUNIDAD RESIDENCIA",
+            "DIRECCIÓN RESIDENCIA",
+            "CUI DEL NIÑO",
+            "SEXO",
+            "EDAD EN AÑOS",
+            "NOMBRE DEL NIÑO",
+            "FECHA NACIMIENTO",
+            "FECHA DEL PRIMER CONTACTO",
+            "FECHA DE REGISTRO",
+            "CIE-10",
+            "DIAGNÓSTICO",
+            "NOMBRE DE LA MADRE",
+            "CUI DE LA MADRE",
+            "NOMBRE DEL PADRE",
+            "CUI DEL PADRE",
+            "TELÉFONOS ENCARGADOS",
+            "VALIDACION",
+        ]
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "SESAN"
+
+        # escribir headers
+        ws.append(headers)
+
+        # opcional: congelar header
+        ws.freeze_panes = "A2"
+
+        # guardar en memoria
+        buffer = io.BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+
+        return buffer
+    
+    def obtener_totales_batch(self, batch_id: int) -> dict:
+        row = self.db.execute(
+            text("""
+                SELECT
+                    id,
+                    total_registros,
+                    total_pendientes,
+                    total_procesados,
+                    total_error,
+                    total_ignorados,
+                    estado
+                FROM sesan_batch
+                WHERE id = :id
+            """),
+            {"id": batch_id},
+        ).mappings().first()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Batch no encontrado.")
+
+        return dict(row)
