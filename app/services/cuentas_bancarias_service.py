@@ -278,7 +278,7 @@ def procesar_respuesta_banco_excel(
     # Guardar archivo en almacenamiento (MinIO)
     # =====================================================
 
-    upload_archivo_banco_core(
+    archivo = upload_archivo_banco_core(
         db=db,
         tipo_operacion="APERTURA_CUENTA",
         operacion_id=lote_id,
@@ -288,6 +288,9 @@ def procesar_respuesta_banco_excel(
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         content=file_bytes,
     )
+
+    # guardar relación lote -> archivo
+    lote.archivo_respuesta_id = archivo["id"]
 
     # =====================================================
     # Procesar Excel
@@ -383,7 +386,6 @@ def procesar_respuesta_banco_excel(
 
 def _spiff_placeholder(lote_id: int):
     pass
-
 
 def generar_excel_lote_export_bytes(db: Session, *, lote_id: int) -> bytes:
 
@@ -497,7 +499,6 @@ def generar_excel_lote_export_bytes(db: Session, *, lote_id: int) -> bytes:
     buffer.seek(0)
 
     return buffer.getvalue()
-
 
 def validar_excel_respuesta_banco(file_bytes: bytes):
 

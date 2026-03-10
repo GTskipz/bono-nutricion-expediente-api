@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import String, func, or_, case
+from sqlalchemy import String, func, or_, case, text
 
 from openpyxl import Workbook
 from io import BytesIO
@@ -17,11 +17,316 @@ from app.models.cat_municipio import CatMunicipio
 from app.models.cat_estado_flujo_expediente import CatEstadoFlujoExpediente
 
 from app.models.cuentas_bancarias import CuentaBancariaExpediente
-from app.models.pagos import LotePago, DetallePago
+from app.models.pagos import (
+    LotePago,
+    DetallePago,
+    CatFiltroPago,
+    CatFiltroPagoOpcion,
+    ExpedienteCuentaCorriente,
+)
 
 # ✅ Tracking por expediente (eventos importantes)
 from app.services.tracking_evento_service import TrackingEventoService
 
+
+# -------------------------------------------------
+# FILTROS DISPONIBLES PARA PAGOS
+# -------------------------------------------------
+def obtener_filtros_pago(db: Session):
+    filtros = (
+        db.query(CatFiltroPago)
+        .filter(CatFiltroPago.activo == True)
+        .order_by(CatFiltroPago.orden)
+        .all()
+    )
+
+    resultado = []
+
+    for f in filtros:
+        item = {
+            "codigo": f.codigo,
+            "nombre": f.nombre,
+            "descripcion": f.descripcion,
+            "tipo_control": f.tipo_control,
+        }
+
+        if f.tipo_control == "SELECT":
+            opciones = (
+                db.query(CatFiltroPagoOpcion)
+                .filter(
+                    CatFiltroPagoOpcion.filtro_id == f.id,
+                    CatFiltroPagoOpcion.activo == True,
+                )
+                .order_by(CatFiltroPagoOpcion.orden)
+                .all()
+            )
+
+            item["opciones"] = [
+                {
+                    "valor": op.valor,
+                    "etiqueta": op.etiqueta,
+                }
+                for op in opciones
+            ]
+
+        resultado.append(item)
+
+    return resultado
+
+# -------------------------------------------------
+# CONSTRUIR WHERE DINAMICO
+# -------------------------------------------------
+def _build_filtros_where(db: Session, filtros: dict):
+
+    filtros_db = (
+        db.query(CatFiltroPago)
+        .filter(CatFiltroPago.activo == True)
+        .all()
+    )
+
+    mapa = {f.codigo: f for f in filtros_db}
+
+    condiciones = []
+    params = {}
+
+    for codigo, valor in (filtros or {}).items():
+
+        f = mapa.get(codigo)
+        if not f:
+            continue
+
+        campo = f.campo_sql
+        operador = f.operador
+        param_name = f"param_{codigo}"
+
+        # convertir números
+        if isinstance(valor, str) and valor.isdigit():
+            valor = int(valor)
+
+        if isinstance(valor, list) and valor:
+
+            placeholders = []
+
+            for idx, item in enumerate(valor):
+
+                sub_name = f"{param_name}_{idx}"
+                placeholders.append(f":{sub_name}")
+                params[sub_name] = item
+
+            condiciones.append(
+                f"{campo} IN ({', '.join(placeholders)})"
+            )
+
+        else:
+
+            condiciones.append(
+                f"{campo} {operador} :{param_name}"
+            )
+
+            params[param_name] = valor
+
+    return condiciones, params
+
+# -------------------------------------------------
+# PREVIEW LOTE DE PAGOS
+# -------------------------------------------------
+def preview_lote_pago(
+    db: Session,
+    *,
+    monto_por_persona: float,
+    presupuesto_total: float,
+    filtros: dict,
+):
+
+    if monto_por_persona <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="El monto_por_persona debe ser mayor a 0"
+        )
+
+    condiciones, params = _build_filtros_where(db, filtros)
+
+    where_sql = " AND ".join(condiciones) if condiciones else "1=1"
+
+    sql = f"""
+    SELECT
+        COUNT(*) AS total
+    FROM expediente_electronico e
+
+    JOIN cuenta_bancaria_expediente cb
+        ON cb.expediente_id = e.id
+
+    LEFT JOIN (
+        SELECT
+            expediente_id,
+            COUNT(*) AS total_pagos
+        FROM expediente_cuenta_corriente
+        WHERE tipo_movimiento = 'PAGO'
+        GROUP BY expediente_id
+    ) pagos
+        ON pagos.expediente_id = e.id
+
+    LEFT JOIN cat_estado_flujo_expediente cefe
+        ON cefe.id = e.estado_flujo_id
+
+    WHERE e.estado_flujo_id = 7
+      AND {where_sql}
+    """
+
+    print("\n=========== SQL ===========")
+    print(sql)
+    print("PARAMS:", params)
+    print("===========================\n")
+
+    row = db.execute(text(sql), params).first()
+
+    beneficiarios_encontrados = int(getattr(row, "total", 0) or 0)
+
+    # cuantos permite el presupuesto
+    beneficiarios_posibles = int(presupuesto_total // monto_por_persona)
+
+    # cuantos realmente se pagarán
+    beneficiarios_final = min(
+        beneficiarios_encontrados,
+        beneficiarios_posibles
+    )
+
+    monto_estimado = beneficiarios_final * monto_por_persona
+
+    return {
+        "beneficiarios_encontrados": beneficiarios_encontrados,
+        "beneficiarios_posibles": beneficiarios_posibles,
+        "monto_estimado": monto_estimado,
+    }
+
+def preview_detalle_lote_pago(
+    db: Session,
+    *,
+    monto_por_persona: float,
+    presupuesto_total: float,
+    filtros: dict,
+    page: int,
+    limit: int,
+):
+
+    if monto_por_persona <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="El monto_por_persona debe ser mayor a 0"
+        )
+
+    condiciones, params = _build_filtros_where(db, filtros)
+
+    where_sql = " AND ".join(condiciones) if condiciones else "1=1"
+
+    offset = (page - 1) * limit
+
+    # ------------------------------
+    # total de beneficiarios
+    # ------------------------------
+
+    sql_total = f"""
+    SELECT
+        COUNT(*) AS total
+    FROM expediente_electronico e
+
+    JOIN cuenta_bancaria_expediente cb
+        ON cb.expediente_id = e.id
+
+    LEFT JOIN (
+        SELECT
+            expediente_id,
+            COUNT(*) AS total_pagos
+        FROM expediente_cuenta_corriente
+        WHERE tipo_movimiento = 'PAGO'
+        GROUP BY expediente_id
+    ) pagos
+        ON pagos.expediente_id = e.id
+
+    WHERE e.estado_flujo_id = 7
+      AND {where_sql}
+    """
+
+    row = db.execute(text(sql_total), params).first()
+    encontrados = int(getattr(row, "total", 0) or 0)
+
+    beneficiarios_posibles = int(presupuesto_total // monto_por_persona)
+
+    beneficiarios_final = min(
+        encontrados,
+        beneficiarios_posibles
+    )
+
+    # ------------------------------
+    # query detalle
+    # ------------------------------
+
+    sql = f"""
+    SELECT
+        e.id AS expediente_id,
+        e.nombre_beneficiario,
+        e.cui_beneficiario,
+        cb.numero_cuenta,
+        cb.banco_codigo,
+        d.nombre AS departamento,
+        m.nombre AS municipio,
+        COALESCE(pagos.total_pagos,0) AS total_pagos
+
+    FROM expediente_electronico e
+
+    JOIN cuenta_bancaria_expediente cb
+        ON cb.expediente_id = e.id
+
+    LEFT JOIN (
+        SELECT
+            expediente_id,
+            COUNT(*) AS total_pagos
+        FROM expediente_cuenta_corriente
+        WHERE tipo_movimiento = 'PAGO'
+        GROUP BY expediente_id
+    ) pagos
+        ON pagos.expediente_id = e.id
+
+    LEFT JOIN cat_departamento d
+        ON d.id = e.departamento_id
+
+    LEFT JOIN cat_municipio m
+        ON m.id = e.municipio_id
+
+    WHERE e.estado_flujo_id = 7
+      AND {where_sql}
+
+    ORDER BY e.created_at DESC
+
+    LIMIT :limit
+    OFFSET :offset
+    """
+
+    params["limit"] = limit
+    params["offset"] = offset
+
+    rows = db.execute(text(sql), params).fetchall()
+
+    data = []
+
+    for r in rows:
+        data.append({
+            "id": r.expediente_id,
+            "nombre_beneficiario": r.nombre_beneficiario,
+            "cui_beneficiario": r.cui_beneficiario,
+            "numero_cuenta": r.numero_cuenta,
+            "banco_codigo": r.banco_codigo,
+            "departamento": r.departamento,
+            "municipio": r.municipio,
+            "total_pagos": r.total_pagos,
+        })
+
+    return {
+        "data": data,
+        "page": page,
+        "limit": limit,
+        "total": beneficiarios_final
+    }
 
 # -------------------------------------------------
 # BANDEJA: expedientes con cuenta bancaria
@@ -189,7 +494,6 @@ def crear_lote_pago(
     db.commit()
     return lote.id, len(rows)
 
-
 # -------------------------------------------------
 # LISTAR LOTES (paginado + filtros)
 # -------------------------------------------------
@@ -273,37 +577,74 @@ def listar_lotes_pago(
 # OBTENER DETALLE DE LOTE
 # -------------------------------------------------
 def obtener_lote_pago(db: Session, *, lote_id: int) -> dict:
+
     lote = db.query(LotePago).filter(LotePago.id == lote_id).first()
+
     if not lote:
-        raise HTTPException(status_code=404, detail="Lote no encontrado")
+        raise HTTPException(status_code=404, detail="Planilla no encontrada")
 
     agg = (
         db.query(
             func.count(DetallePago.id).label("total_items"),
-            func.coalesce(func.sum(case((DetallePago.estado == "PAGADO", 1), else_=0)), 0).label("pagados"),
-            func.coalesce(func.sum(case((DetallePago.estado == "RECHAZADO", 1), else_=0)), 0).label("rechazados"),
+            func.coalesce(
+                func.sum(case((DetallePago.estado == "PAGADO", 1), else_=0)), 0
+            ).label("pagados"),
+            func.coalesce(
+                func.sum(case((DetallePago.estado == "RECHAZADO", 1), else_=0)), 0
+            ).label("rechazados"),
         )
         .filter(DetallePago.lote_id == lote_id)
         .first()
     )
 
+    presupuesto_total = (
+        float(lote.presupuesto_total)
+        if getattr(lote, "presupuesto_total", None) is not None
+        else None
+    )
+
+    monto_usado = (
+        float(lote.monto_usado)
+        if getattr(lote, "monto_usado", None) is not None
+        else None
+    )
+
+    monto_no_usado = None
+    if presupuesto_total is not None and monto_usado is not None:
+        monto_no_usado = presupuesto_total - monto_usado
+
     return {
+
         "id": lote.id,
+
         "anio_fiscal": lote.anio_fiscal,
         "mes_fiscal": lote.mes_fiscal,
+
         "banco_codigo": lote.banco_codigo,
         "estado": lote.estado,
+
         "creado_por": lote.creado_por,
         "creado_en": lote.creado_en,
         "procesado_en": lote.procesado_en,
+
         "observacion": lote.observacion,
+
         "monto_por_persona": float(lote.monto_por_persona),
         "tope_anual_persona": float(lote.tope_anual_persona),
+
+        "presupuesto_total": presupuesto_total,
+        "monto_usado": monto_usado,
+        "monto_no_usado": monto_no_usado,
+
+        "beneficiarios_encontrados": getattr(lote, "beneficiarios_encontrados", None),
+
+        "filtros_json": lote.filtros_json,
+
         "total_items": int(getattr(agg, "total_items", 0) or 0),
         "pagados": int(getattr(agg, "pagados", 0) or 0),
         "rechazados": int(getattr(agg, "rechazados", 0) or 0),
-    }
 
+    }
 
 # -------------------------------------------------
 # LISTAR ITEMS DE LOTE
@@ -393,8 +734,20 @@ def procesar_lote_pago_simulado(db: Session, *, lote_id: int) -> dict:
             continue
 
         try:
-            # acumulado anual pagado (solo items PAGADO del mismo expediente/año)
-            acumulado = (
+            # acumulado anual pagado:
+            # 1) histórico real en cuenta corriente del expediente
+            acumulado_cc = (
+                db.query(func.coalesce(func.sum(ExpedienteCuentaCorriente.monto), 0))
+                .filter(
+                    ExpedienteCuentaCorriente.expediente_id == it.expediente_id,
+                    ExpedienteCuentaCorriente.tipo_movimiento == "PAGO",
+                )
+                .scalar()
+                or 0
+            )
+
+            # 2) por compatibilidad, también se conserva el cálculo previo sobre detalle_pago pagado del mismo año
+            acumulado_detalle = (
                 db.query(func.coalesce(func.sum(DetallePago.monto_asignado), 0))
                 .filter(
                     DetallePago.expediente_id == it.expediente_id,
@@ -404,6 +757,8 @@ def procesar_lote_pago_simulado(db: Session, *, lote_id: int) -> dict:
                 .scalar()
                 or 0
             )
+
+            acumulado = max(float(acumulado_cc), float(acumulado_detalle))
 
             it.acumulado_pagado_antes = acumulado
             it.actualizado_en = now
@@ -450,6 +805,19 @@ def procesar_lote_pago_simulado(db: Session, *, lote_id: int) -> dict:
             it.response_payload = {"ok": True, "referencia": ref}
             it.procesado_en = now
             pagados += 1
+
+            # ✅ REGISTRO EN CUENTA CORRIENTE
+            db.add(
+                ExpedienteCuentaCorriente(
+                    expediente_id=it.expediente_id,
+                    tipo_movimiento="PAGO",
+                    referencia_tipo="LOTE_PAGO",
+                    referencia_id=lote.id,
+                    monto=it.monto_asignado,
+                    descripcion=f"Pago lote #{lote.id} periodo {lote.anio_fiscal}-{lote.mes_fiscal:02d}",
+                    created_by=None,
+                )
+            )
 
             # ✅ TRACKING IMPORTANTE: pago aprobado (por expediente)
             TrackingEventoService._registrar(
@@ -576,3 +944,143 @@ def generar_excel_lote_pago_export_bytes(db: Session, *, lote_id: int) -> bytes:
     wb.save(buf)
     buf.seek(0)
     return buf.getvalue()
+
+# -------------------------------------------------
+# CREAR LOTE POR FILTROS + PRESUPUESTO
+# -------------------------------------------------
+def crear_lote_pago_por_filtros(
+    db: Session,
+    *,
+    anio_fiscal: int,
+    mes_fiscal: int,
+    monto_por_persona: float,
+    tope_anual_persona: float,
+    presupuesto_total: float,
+    filtros: dict,
+    creado_por: Optional[str] = None,
+    observacion: Optional[str] = None,
+) -> Tuple[int, int]:
+
+    if monto_por_persona <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="monto_por_persona debe ser mayor a 0"
+        )
+
+    max_beneficiarios = int(presupuesto_total // monto_por_persona)
+
+    if max_beneficiarios <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="El presupuesto no alcanza para ningún beneficiario"
+        )
+
+    condiciones, params = _build_filtros_where(db, filtros)
+    where_sql = " AND ".join(condiciones) if condiciones else "1=1"
+
+    sql = f"""
+    SELECT
+        e.id,
+        e.cui_beneficiario,
+        e.nombre_beneficiario,
+        cb.banco_codigo,
+        cb.numero_cuenta
+    FROM expediente_electronico e
+
+    JOIN cuenta_bancaria_expediente cb
+        ON cb.expediente_id = e.id
+
+    LEFT JOIN (
+        SELECT
+            expediente_id,
+            COUNT(*) AS total_pagos
+        FROM expediente_cuenta_corriente
+        WHERE tipo_movimiento = 'PAGO'
+        GROUP BY expediente_id
+    ) pagos
+        ON pagos.expediente_id = e.id
+
+    LEFT JOIN cat_estado_flujo_expediente cefe
+        ON cefe.id = e.estado_flujo_id
+
+    WHERE e.estado_flujo_id = 7
+      AND {where_sql}
+
+    ORDER BY e.created_at ASC
+    LIMIT :limit
+    """
+
+    params["limit"] = max_beneficiarios
+
+    rows = db.execute(text(sql), params).fetchall()
+
+    if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail="No se encontraron beneficiarios con los filtros aplicados"
+        )
+
+    # -------------------------------------------------
+    # CREAR LOTE
+    # -------------------------------------------------
+
+    lote = LotePago(
+        anio_fiscal=anio_fiscal,
+        mes_fiscal=mes_fiscal,
+        monto_por_persona=monto_por_persona,
+        tope_anual_persona=tope_anual_persona,
+        presupuesto_total=presupuesto_total,
+        monto_usado=len(rows) * monto_por_persona,
+        beneficiarios_encontrados=len(rows),
+        filtros_json=filtros,
+        banco_codigo="BANRURAL",
+        estado="CREADO",
+        creado_por=creado_por,
+        observacion=observacion,
+    )
+
+    db.add(lote)
+    db.flush()
+
+    # -------------------------------------------------
+    # CREAR ITEMS
+    # -------------------------------------------------
+
+    for r in rows:
+
+        db.add(
+            DetallePago(
+                lote_id=lote.id,
+                expediente_id=r.id,
+                anio_fiscal=anio_fiscal,
+                mes_fiscal=mes_fiscal,
+                estado="PENDIENTE",
+                monto_asignado=monto_por_persona,
+                cui_beneficiario=r.cui_beneficiario,
+                nombre_beneficiario=r.nombre_beneficiario,
+                banco_codigo=r.banco_codigo or "BANRURAL",
+                numero_cuenta=r.numero_cuenta,
+            )
+        )
+
+        # -------------------------------------------------
+        # TRACKING EVENTO
+        # -------------------------------------------------
+
+        TrackingEventoService._registrar(
+            db,
+            expediente_id=int(r.id),
+            titulo="Intento de pago",
+            origen=TrackingEventoService.ORIGEN_PAGOS,
+            tipo_evento=TrackingEventoService.PAGO_INTENTO,
+            usuario=creado_por,
+            observacion=(
+                f"Lote #{lote.id} | Periodo {anio_fiscal}-{mes_fiscal:02d} "
+                f"| Monto Q{float(monto_por_persona):,.2f}"
+            ),
+            commit=False,
+        )
+
+    db.commit()
+
+    return lote.id, len(rows)

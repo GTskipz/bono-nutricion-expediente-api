@@ -176,8 +176,7 @@ def descargar_respuesta_banco(
 
     result = descargar_archivo_operacion(
         db,
-        tipo_operacion="APERTURA_CUENTA",
-        operacion_id=lote_id,
+        lote_id=lote_id,
         tipo_archivo="RESPUESTA",
     )
 

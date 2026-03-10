@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from app.core.minio import minio_client
 
 from app.models.banco_archivo_operacion import BancoArchivoOperacion
+from app.models.cuentas_bancarias import LoteAperturaCuenta
 
 
 # ======================================================
@@ -231,20 +232,40 @@ def descargar_archivo_banco(
 def descargar_archivo_operacion(
     db: Session,
     *,
-    tipo_operacion: str,
-    operacion_id: int,
-    tipo_archivo: str,
+    lote_id: int,
+    tipo_archivo: str,  # SOLICITUD | RESPUESTA
 ):
     """
-    Descarga el último archivo asociado a una operación bancaria
+    Descarga el archivo asociado a un lote de apertura de cuenta
     """
+
+    lote = (
+        db.query(LoteAperturaCuenta)
+        .filter(LoteAperturaCuenta.id == lote_id)
+        .first()
+    )
+
+    if not lote:
+        raise HTTPException(status_code=404, detail="Lote no encontrado")
+
+    # ======================================================
+    # determinar archivo
+    # ======================================================
+
+    archivo_id = None
+
+    if tipo_archivo == "SOLICITUD":
+        archivo_id = lote.archivo_solicitud_id
+
+    elif tipo_archivo == "RESPUESTA":
+        archivo_id = lote.archivo_respuesta_id
+
+    if not archivo_id:
+        raise HTTPException(status_code=404, detail="Archivo no disponible")
 
     archivo = (
         db.query(BancoArchivoOperacion)
-        .filter(BancoArchivoOperacion.tipo_operacion == tipo_operacion)
-        .filter(BancoArchivoOperacion.operacion_id == operacion_id)
-        .filter(BancoArchivoOperacion.tipo_archivo == tipo_archivo)
-        .order_by(BancoArchivoOperacion.created_at.desc())
+        .filter(BancoArchivoOperacion.id == archivo_id)
         .first()
     )
 

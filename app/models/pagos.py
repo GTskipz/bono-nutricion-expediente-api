@@ -19,6 +19,13 @@ class LotePago(Base):
     monto_por_persona: Mapped[float] = mapped_column(Numeric(14, 2), nullable=False)
     tope_anual_persona: Mapped[float] = mapped_column(Numeric(14, 2), nullable=False)
 
+    # NUEVOS CAMPOS PARA PRESUPUESTO Y FILTROS
+    presupuesto_total: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    monto_usado: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    beneficiarios_encontrados: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    filtros_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
     banco_codigo: Mapped[str] = mapped_column(String(50), nullable=False, default="BANRURAL")
     proveedor_servicio: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
@@ -92,3 +99,92 @@ class DetallePago(Base):
     actualizado_en: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
 
     lote = relationship("LotePago", back_populates="items")
+
+
+class ExpedienteCuentaCorriente(Base):
+    __tablename__ = "expediente_cuenta_corriente"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    expediente_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("expediente_electronico.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+
+    tipo_movimiento: Mapped[str] = mapped_column(String(30), nullable=False)
+    # PAGO, REVERSO, AJUSTE
+
+    referencia_tipo: Mapped[str] = mapped_column(String(30), nullable=False)
+    # LOTE_PAGO, AJUSTE_MANUAL
+
+    referencia_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    monto: Mapped[float] = mapped_column(Numeric(14, 2), nullable=False)
+
+    descripcion: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=func.now()
+    )
+
+
+class CatFiltroPago(Base):
+    __tablename__ = "cat_filtro_pago"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    codigo: Mapped[str] = mapped_column(String(50), nullable=False, unique=True)
+    nombre: Mapped[str] = mapped_column(String(150), nullable=False)
+
+    descripcion: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    campo_sql: Mapped[str] = mapped_column(String(100), nullable=False)
+    operador: Mapped[str] = mapped_column(String(10), nullable=False)
+
+    tipo_control: Mapped[str] = mapped_column(String(30), nullable=False)
+    # NUMBER, SELECT, BOOLEAN
+
+    activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    orden: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=func.now()
+    )
+
+    opciones = relationship(
+        "CatFiltroPagoOpcion",
+        back_populates="filtro",
+        cascade="all, delete-orphan",
+        passive_deletes=True
+    )
+
+
+class CatFiltroPagoOpcion(Base):
+    __tablename__ = "cat_filtro_pago_opcion"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    filtro_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("cat_filtro_pago.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
+    )
+
+    valor: Mapped[str] = mapped_column(String(100), nullable=False)
+    etiqueta: Mapped[str] = mapped_column(String(150), nullable=False)
+
+    orden: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    filtro = relationship("CatFiltroPago", back_populates="opciones")

@@ -914,3 +914,46 @@ def pasar_a_docs_verificados(db: Session, expediente_id: int):
 
     db.commit()
     return dict(row)
+
+def obtener_cuenta_corriente_expediente(
+    db: Session,
+    *,
+    expediente_id: int,
+):
+
+    rows = db.execute(
+        text("""
+        SELECT
+            id,
+            expediente_id,
+            tipo_movimiento,
+            referencia_tipo,
+            referencia_id,
+            monto,
+            descripcion,
+            created_at
+        FROM expediente_cuenta_corriente
+        WHERE expediente_id = :expediente_id
+        ORDER BY created_at DESC
+        """),
+        {"expediente_id": expediente_id},
+    ).fetchall()
+
+    data = []
+
+    for r in rows:
+        data.append({
+            "id": r.id,
+            "tipo_movimiento": r.tipo_movimiento,
+            "referencia_tipo": r.referencia_tipo,
+            "referencia_id": r.referencia_id,
+            "monto": float(r.monto),
+            "descripcion": r.descripcion,
+            "created_at": r.created_at,
+        })
+
+    return {
+        "expediente_id": expediente_id,
+        "total_movimientos": len(data),
+        "data": data,
+    }

@@ -29,6 +29,7 @@ from app.schemas.tracking_evento import TrackingCreate, TrackingOut
 from app.services.expedientes_service import (
     buscar_persona_expedientes_service,
     crear_expediente_core,
+    obtener_cuenta_corriente_expediente,
     obtener_expediente,
     obtener_expediente_detalle,
     buscar_expedientes,
@@ -308,3 +309,14 @@ def buscar_persona_expedientes(
     db: Session = Depends(get_db),
 ):
     return buscar_persona_expedientes_service(db, payload)
+
+@router.get("/{expediente_id}/cuenta-corriente")
+def obtener_cuenta_corriente(
+    expediente_id: int,
+    db: Session = Depends(get_db),
+):
+
+    return obtener_cuenta_corriente_expediente(
+        db,
+        expediente_id=expediente_id,
+    )
