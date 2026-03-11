@@ -295,7 +295,7 @@ class SesanService:
     # =====================================================
     # ✅ Procesar 1 fila (BPM decide → si aprueba crea expediente)
         # =====================================================
-    async def _procesar_row_creando_expediente(self, row_id: int):
+    async def _procesar_row_creando_expediente(self, row_id: int, usuario_id: str | None = None):
         print(f"[SESAN] ▶️ Iniciando procesamiento row_id={row_id}")
 
         row = self.db.execute(
@@ -366,6 +366,9 @@ class SesanService:
         try:
             print(f"[SESAN][BPM] ▶️ Construyendo payload BPM row_id={row_id}")
             payload_spiff = build_spiff_payload_from_staging_row(row=row)
+            
+            # ✅ Agregamos usuario_id al payload de BPM para trazabilidad
+            payload_spiff["usuario_id"] = usuario_id
 
             print(f"[SESAN][BPM] Payload enviado:\n{payload_spiff}")
 
@@ -415,7 +418,6 @@ class SesanService:
             print(f"[SESAN][BPM][ERROR] ❌ {str(e)}")
             self._set_row_error(row_id, "BPM_ERROR", str(e))
             raise ValueError(f"BPM_ERROR|{str(e)}")
-
         # =====================================================
         # ✅ Crear expediente
         # =====================================================
@@ -424,6 +426,14 @@ class SesanService:
 
             payload = self._build_expediente_payload_from_row(row, anio_carga, mes_carga)
             exp = crear_expediente_core(payload, self.db)
+
+            
+            #Persistir identidad en la nueva columna de expediente_electronico
+            if usuario_id:
+                self.db.execute(
+                    text("UPDATE expediente_electronico SET usuario_creacion_id = :uid WHERE id = :eid"),
+                    {"uid": usuario_id, "eid": int(exp.id)}
+                )
 
             set_expediente_bpm_minimo_core(
                 self.db,
@@ -848,7 +858,7 @@ class SesanService:
     # =====================================================
     # 4) Procesar pendientes batch
     # =====================================================
-    async def procesar_pendientes_batch(self, *, batch_id: int, limit: int):
+    async def procesar_pendientes_batch(self, *, batch_id: int, limit: int, usuario_id: str | None = None):
         try:
             batch = self.db.execute(
                 text("SELECT id, anio_carga FROM sesan_batch WHERE id = :id"),
@@ -876,7 +886,7 @@ class SesanService:
             for r in rows:
                 rid = int(r["id"])
                 try:
-                    await self._procesar_row_creando_expediente(rid)
+                    await self._procesar_row_creando_expediente(rid, usuario_id=usuario_id)
                     procesados += 1
                 except ValueError as ve:
                     raw = str(ve)
@@ -913,9 +923,9 @@ class SesanService:
     # =====================================================
     # 5) Procesar fila individual
     # =====================================================
-    async def procesar_row(self, *, row_id: int):
+    async def procesar_row(self, *, row_id: int, usuario_id: str | None = None):
         try:
-            result = await self._procesar_row_creando_expediente(row_id)
+            result = await self._procesar_row_creando_expediente(row_id, usuario_id=usuario_id)
             self.db.commit()
             return result
 

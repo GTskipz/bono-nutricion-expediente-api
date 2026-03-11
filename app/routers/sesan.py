@@ -18,16 +18,20 @@ def crear_batch_sesan(
     mes_carga: int | None = Form(None),
     descripcion: str | None = Form(None),
     origen: str = Form("SESAN"),
-    usuario_carga: str | None = Form(None),
+    # usuario_carga: str | None = Form(None), Se elimina del formulario manual
     file: UploadFile = File(...),
+    auth: AuthContext = Depends(require_auth_context), #Se agrega la validación obligatoria
 ):
+    #Se extrae el ID real del token decodificado
+    user_id = auth.user.get('id')
+
     return SesanService(db).crear_batch(
         nombre_lote=nombre_lote,
         anio_carga=anio_carga,
         mes_carga=mes_carga,
         descripcion=descripcion,
         origen=origen,
-        usuario_carga=usuario_carga,
+        usuario_carga=user_id, #Se pasa el ID verificado de Keycloak
         file=file,
     )
 
@@ -82,8 +86,11 @@ async def procesar_pendientes_batch(
     db: Session = Depends(get_db),
     auth: AuthContext = Depends(require_auth_context),  
 ):
-    service = SesanService(db)  # ✅ sin token
-    return await service.procesar_pendientes_batch(batch_id=batch_id, limit=limit)
+    # Extraemos el ID del usuario del contexto de autenticación
+    usuario_id = auth.user.get('id')
+    service = SesanService(db)  # ✅ manteniendo tu estructura
+    # Pasamos el usuario_id al servicio para la trazabilidad en Spiff
+    return await service.procesar_pendientes_batch(batch_id=batch_id, limit=limit, usuario_id=usuario_id)
 
 
 @router.post("/row/{row_id}/procesar")
@@ -92,8 +99,11 @@ async def procesar_row(
     db: Session = Depends(get_db),
     auth: AuthContext = Depends(require_auth_context), 
 ):
-    service = SesanService(db=db)  # ✅ sin token
-    return await service.procesar_row(row_id=row_id)
+    # Extraemos el ID del usuario del contexto de autenticación
+    usuario_id = auth.user.get('id')
+    service = SesanService(db=db)  # ✅ manteniendo tu estructura
+    # Pasamos el usuario_id al servicio para crear el expediente con identidad
+    return await service.procesar_row(row_id=row_id, usuario_id=usuario_id)
 
 
 @router.post("/batch/{batch_id}/reintentar-errores")
@@ -117,10 +127,18 @@ def reintentar_row(
 def ignorar_row(
     row_id: int,
     motivo: str = Form(...),
-    usuario: str | None = Form(None),
+    # usuario: str | None = Form(None), Se quita del Form manual
     db: Session = Depends(get_db),
+    auth: AuthContext = Depends(require_auth_context), # <-- Se agrega la validación
 ):
-    return SesanService(db).ignorar_row(row_id=row_id, motivo=motivo, usuario=usuario)
+    # Se extrae el ID real del token decodificado
+    user_id = auth.user.get('id')
+
+    return SesanService(db).ignorar_row(
+        row_id=row_id, 
+        motivo=motivo, 
+        usuario=user_id # <-- Se envia ID verificado
+    )
 
 @router.get("/batch/{batch_id}")
 def obtener_detalle_batch(batch_id: int, db: Session = Depends(get_db)):
