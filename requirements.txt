@@ -14,3 +14,6 @@ python-docx==1.1.2
 reportlab
 httpx
 minio
+
+# SEGURIDAD Y JWT
+python-jose[cryptography]
