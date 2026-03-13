@@ -10,7 +10,10 @@ from sqlalchemy import text
 from datetime import date, datetime
 import json
 
+from app.core.db import SessionLocal
 from app.services.excel_reader import read_sesan_xlsx_rows
+from app.services.sesan_batch_processor import SesanBatchProcessor
+from app.services.sesan_expediente_service import SesanExpedienteCreator
 from app.services.utils import (
     norm_str, to_int, to_date, sha256_bytes, to_cui, to_rub, norm_lookup
 )
@@ -143,39 +146,6 @@ class SesanService:
             },
         )
 
-    def _set_row_error(self, row_id: int, code: str, msg: str):
-        self.db.execute(
-            text("""
-                UPDATE sesan_staging
-                SET
-                  estado = 'ERROR',
-                  error_code = :code,
-                  error_mensaje = :msg,
-                  intentos = COALESCE(intentos, 0) + 1,
-                  ultimo_intento_at = NOW(),
-                  updated_at = NOW()
-                WHERE id = :id
-            """),
-            {"id": row_id, "code": code, "msg": msg},
-        )
-
-    def _set_row_processed(self, row_id: int, expediente_id: int):
-        self.db.execute(
-            text("""
-                UPDATE sesan_staging
-                SET
-                  estado = 'PROCESADO',
-                  expediente_id = :expediente_id,
-                  error_code = NULL,
-                  error_mensaje = NULL,
-                  intentos = COALESCE(intentos, 0) + 1,
-                  ultimo_intento_at = NOW(),
-                  updated_at = NOW()
-                WHERE id = :id
-            """),
-            {"id": row_id, "expediente_id": expediente_id},
-        )
-
     def _is_dup_cui_in_year(self, cui_nino: str, anio_carga: int, current_row_id: int) -> bool:
         exists = self.db.execute(
             text("""
@@ -292,176 +262,6 @@ class SesanService:
 
         return payload
 
-    # =====================================================
-    # ✅ Procesar 1 fila (BPM decide → si aprueba crea expediente)
-        # =====================================================
-    async def _procesar_row_creando_expediente(self, row_id: int, usuario_id: str | None = None):
-        print(f"[SESAN] ▶️ Iniciando procesamiento row_id={row_id}")
-
-        row = self.db.execute(
-            text("""
-                SELECT
-                s.*,
-                b.anio_carga,
-                b.mes_carga
-                FROM sesan_staging s
-                JOIN sesan_batch b ON b.id = s.batch_id
-                WHERE s.id = :id
-                FOR UPDATE
-            """),
-            {"id": row_id},
-        ).mappings().first()
-
-        if not row:
-            print(f"[SESAN][ERROR] ❌ Row {row_id} no encontrada")
-            raise HTTPException(status_code=404, detail="Fila staging no encontrada.")
-
-        print(f"[SESAN] Estado actual={row.get('estado')} batch_id={row.get('batch_id')}")
-
-        if row["estado"] == "IGNORADO":
-            print(f"[SESAN] ⚠️ Row {row_id} está IGNORADA")
-            raise HTTPException(status_code=409, detail="La fila está IGNORADA.")
-
-        if row["estado"] == "PROCESADO" and row.get("expediente_id"):
-            print(f"[SESAN] ✅ Row {row_id} ya procesada expediente_id={row.get('expediente_id')}")
-            return {"row_id": row_id, "estado": "PROCESADO", "expediente_id": int(row["expediente_id"])}
-
-        anio_carga = int(row["anio_carga"])
-        mes_carga = int(row["mes_carga"]) if row.get("mes_carga") is not None else None
-
-        rub = to_rub(row.get("rub"))
-        cui = to_cui(row.get("cui_nino"))
-        nombre = norm_str(row.get("nombre_nino"))
-
-        print(f"[SESAN] Datos básicos -> año={anio_carga} mes={mes_carga} rub={rub} cui={cui} nombre={nombre}")
-
-        if not cui:
-            print(f"[SESAN][ERROR] ❌ CUI vacío row_id={row_id}")
-            raise ValueError("MISSING_CUI|CUI del niño vacío.")
-
-        if not nombre:
-            print(f"[SESAN][ERROR] ❌ Nombre vacío row_id={row_id}")
-            raise ValueError("MISSING_NAME|Nombre del niño vacío.")
-
-        if self._is_dup_cui_in_year(cui, anio_carga, row_id):
-            print(f"[SESAN][ERROR] ❌ CUI duplicado en staging año={anio_carga}")
-            raise ValueError(f"DUP_CUI_YEAR|CUI duplicado en el año de carga {anio_carga} (staging).")
-
-        if self._is_dup_cui_in_expedientes(cui, anio_carga):
-            print(f"[SESAN][ERROR] ❌ CUI duplicado en expedientes año={anio_carga}")
-            raise ValueError(f"DUP_CUI_YEAR|CUI duplicado en el año de carga {anio_carga} (expedientes).")
-
-        if rub:
-            if self._is_dup_rub_in_year(rub, anio_carga, row_id):
-                print(f"[SESAN][ERROR] ❌ RUB duplicado en staging año={anio_carga}")
-                raise ValueError(f"DUP_RUB_YEAR|RUB duplicado en el año de carga {anio_carga} (staging).")
-
-            if self._is_dup_rub_in_expedientes(rub, anio_carga):
-                print(f"[SESAN][ERROR] ❌ RUB duplicado en expedientes año={anio_carga}")
-                raise ValueError(f"DUP_RUB_YEAR|RUB duplicado en el año de carga {anio_carga} (expedientes).")
-
-        # =====================================================
-        # ✅ BPM decide
-        # =====================================================
-        try:
-            print(f"[SESAN][BPM] ▶️ Construyendo payload BPM row_id={row_id}")
-            payload_spiff = build_spiff_payload_from_staging_row(row=row)
-            
-            # ✅ Agregamos usuario_id al payload de BPM para trazabilidad
-            payload_spiff["usuario_id"] = usuario_id
-
-            print(f"[SESAN][BPM] Payload enviado:\n{payload_spiff}")
-
-            self._set_row_bpm_request(row_id=row_id, bpm_req=payload_spiff)
-
-            print(f"[SESAN][BPM] ▶️ Enviando a Spiff (message registrar_nutricion)")
-            bpm_eval = await self.bpm.evaluate_run_and_get_decision(payload_spiff)
-
-            print(
-                f"[SESAN][BPM] Respuesta -> "
-                f"instance_id={bpm_eval.bpm_instance_id} "
-                f"status={bpm_eval.status} "
-                f"milestone={bpm_eval.last_milestone_bpmn_name} "
-                f"should_create={bpm_eval.should_create_expediente}"
-            )
-
-            iid = bpm_eval.bpm_instance_id
-            iid_str = str(iid) if iid and int(iid) > 0 else None
-
-            self._set_row_bpm_result(
-                row_id=row_id,
-                bpm_status=bpm_eval.status,
-                bpm_res=bpm_eval.raw_create,
-                bpm_instance_id=iid_str,
-            )
-
-            # ✅ FIX 1: si BPM dice crear, debe traer instance_id válido
-            if bpm_eval.should_create_expediente and not (iid and int(iid) > 0):
-                self._set_row_error(
-                    row_id,
-                    "BPM_SIN_INSTANCE_ID",
-                    "BPM indicó crear expediente pero no devolvió process_instance.id."
-                )
-                return {"row_id": row_id, "estado": "ERROR", "codigo": "BPM_SIN_INSTANCE_ID"}
-
-            if not bpm_eval.should_create_expediente:
-                print("[SESAN][BPM] ❌ NO permitido crear expediente (BPM rechazó/validación fallida)")
-                self._set_row_error(row_id, "BPM_NO_PERMITE_CREAR", "BPM no autorizó crear expediente para este registro.")
-                return {"row_id": row_id, "estado": "ERROR", "codigo": "BPM_NO_PERMITE_CREAR"}
-
-        except Exception as e:
-            try:
-                self.db.rollback()
-            except Exception:
-                pass
-
-            print(f"[SESAN][BPM][ERROR] ❌ {str(e)}")
-            self._set_row_error(row_id, "BPM_ERROR", str(e))
-            raise ValueError(f"BPM_ERROR|{str(e)}")
-        # =====================================================
-        # ✅ Crear expediente
-        # =====================================================
-        try:
-            print(f"[SESAN] ▶️ Creando expediente electrónico row_id={row_id}")
-
-            payload = self._build_expediente_payload_from_row(row, anio_carga, mes_carga)
-            exp = crear_expediente_core(payload, self.db)
-
-            
-            #Persistir identidad en la nueva columna de expediente_electronico
-            if usuario_id:
-                self.db.execute(
-                    text("UPDATE expediente_electronico SET usuario_creacion_id = :uid WHERE id = :eid"),
-                    {"uid": usuario_id, "eid": int(exp.id)}
-                )
-
-            set_expediente_bpm_minimo_core(
-                self.db,
-                expediente_id=int(exp.id),
-                spiff_instance=bpm_eval.raw_create,
-            )
-
-            self.db.commit()
-
-            self._set_row_processed(row_id, int(exp.id))
-            self._recalc_batch_counts(int(row["batch_id"]))
-
-            print(f"[SESAN] ✅ Expediente creado id={exp.id} row_id={row_id}")
-
-            return {"row_id": row_id, "estado": "PROCESADO", "expediente_id": int(exp.id)}
-
-        except Exception as e:
-            # ✅ FIX 2: rollback SIEMPRE si falla creando/actualizando
-            try:
-                self.db.rollback()
-            except Exception:
-                pass
-
-            print(f"[SESAN][ERROR] ❌ Error creando expediente: {str(e)}")
-            self._set_row_error(row_id, "EXPEDIENTE_ERROR", str(e))
-            self.db.commit()
-            raise
-        
     # =====================================================
     # 1) Crear batch + staging (SUBIDA)
     # =====================================================
@@ -858,121 +658,80 @@ class SesanService:
     # =====================================================
     # 4) Procesar pendientes batch
     # =====================================================
-    async def procesar_pendientes_batch(self, *, batch_id: int, limit: int, usuario_id: str | None = None):
-        try:
-            batch = self.db.execute(
-                text("SELECT id, anio_carga FROM sesan_batch WHERE id = :id"),
-                {"id": batch_id},
-            ).mappings().first()
+    @staticmethod
+    async def procesar_pendientes_batch_background(
+        batch_id: int,
+        limit: int,
+        usuario_id: str | None = None,
+    ):
 
-            if not batch:
-                raise HTTPException(status_code=404, detail="Batch no encontrado.")
+        db = SessionLocal()
+
+        try:
+
+            service = SesanService(db)
+
+            await service.procesar_pendientes_batch(
+                batch_id=batch_id,
+                limit=limit,
+                usuario_id=usuario_id,
+            )
+
+        finally:
+
+            db.close()
+        
+    async def procesar_pendientes_batch(
+        self,
+        *,
+        batch_id: int,
+        limit: int,
+        usuario_id: str | None = None
+    ):
+
+        processor = SesanBatchProcessor(self.bpm)
+
+        while True:
 
             rows = self.db.execute(
                 text("""
                     SELECT id
                     FROM sesan_staging
                     WHERE batch_id = :batch_id
-                      AND estado = 'PENDIENTE'
+                    AND estado = 'PENDIENTE'
                     ORDER BY row_num ASC
                     LIMIT :limit
                 """),
                 {"batch_id": batch_id, "limit": limit},
             ).mappings().all()
 
-            procesados = 0
-            errores = 0
+            ids = [int(r["id"]) for r in rows]
 
-            for r in rows:
-                rid = int(r["id"])
-                try:
-                    await self._procesar_row_creando_expediente(rid, usuario_id=usuario_id)
-                    procesados += 1
-                except ValueError as ve:
-                    raw = str(ve)
-                    if "|" in raw:
-                        code, msg = raw.split("|", 1)
-                    else:
-                        code, msg = "VALIDATION_ERROR", raw
-                    self._set_row_error(rid, code.strip(), msg.strip())
-                    errores += 1
-                except HTTPException as he:
-                    self._set_row_error(rid, "HTTP_ERROR", str(he.detail))
-                    errores += 1
-                except Exception as e:
-                    self._set_row_error(rid, "UNEXPECTED_ERROR", str(e))
-                    errores += 1
+            if not ids:
+                break
 
-            self._recalc_batch_counts(batch_id)
-            self.db.commit()
-
-            return {
-                "batch_id": batch_id,
-                "procesados": procesados,
-                "errores": errores,
-                "total_intentados": len(rows),
-            }
-
-        except HTTPException:
-            self.db.rollback()
-            raise
-        except Exception as e:
-            self.db.rollback()
-            raise HTTPException(status_code=500, detail=f"Error procesando pendientes: {str(e)}")
+            await processor.procesar_lote(
+                row_ids=ids,
+                usuario_id=usuario_id
+            )
 
     # =====================================================
     # 5) Procesar fila individual
     # =====================================================
-    async def procesar_row(self, *, row_id: int, usuario_id: str | None = None):
-        try:
-            result = await self._procesar_row_creando_expediente(row_id, usuario_id=usuario_id)
-            self.db.commit()
-            return result
+    async def procesar_row(
+        self,
+        *,
+        row_id: int,
+        usuario_id: str | None = None
+    ):
 
-        except HTTPException:
-            self.db.rollback()
-            raise
+        processor = SesanBatchProcessor(self.bpm)
 
-        except ValueError as ve:
-            self.db.rollback()
-            raw = str(ve)
-            if "|" in raw:
-                code, msg = raw.split("|", 1)
-            else:
-                code, msg = "VALIDATION_ERROR", raw
-
-            self._set_row_error(row_id, code.strip(), msg.strip())
-
-            try:
-                b = self.db.execute(
-                    text("SELECT batch_id FROM sesan_staging WHERE id=:id"),
-                    {"id": row_id},
-                ).scalar()
-                if b is not None:
-                    self._recalc_batch_counts(int(b))
-                self.db.commit()
-            except Exception:
-                self.db.rollback()
-
-            raise HTTPException(status_code=422, detail=msg.strip())
-
-        except Exception as e:
-            self.db.rollback()
-            self._set_row_error(row_id, "UNEXPECTED_ERROR", str(e))
-
-            try:
-                b = self.db.execute(
-                    text("SELECT batch_id FROM sesan_staging WHERE id=:id"),
-                    {"id": row_id},
-                ).scalar()
-                if b is not None:
-                    self._recalc_batch_counts(int(b))
-                self.db.commit()
-            except Exception:
-                self.db.rollback()
-
-            raise HTTPException(status_code=500, detail=f"Error procesando fila: {str(e)}")
-
+        return await processor.procesar_row(
+            row_id=row_id,
+            usuario_id=usuario_id
+        )
+    
     # =====================================================
     # 6) Reintentar errores batch
     # =====================================================
@@ -1155,6 +914,7 @@ class SesanService:
                     estado,
                     total_registros,
                     total_pendientes,
+                    total_en_proceso,
                     total_procesados,
                     total_error,
                     total_ignorados,
@@ -1319,6 +1079,7 @@ class SesanService:
                     id,
                     total_registros,
                     total_pendientes,
+                    total_en_proceso,
                     total_procesados,
                     total_error,
                     total_ignorados,
@@ -1333,3 +1094,32 @@ class SesanService:
             raise HTTPException(status_code=404, detail="Batch no encontrado.")
 
         return dict(row)
+    
+    def reprocesar_batch_esperando_callback(self, batch_id: int):
+
+        rows = self.db.execute(
+            text("""
+                SELECT bpm_instance_id
+                FROM sesan_staging
+                WHERE batch_id = :batch_id
+                AND estado = 'ESPERANDO_CALLBACK'
+            """),
+            {"batch_id": batch_id},
+        ).mappings().all()
+
+        creator = SesanExpedienteCreator()
+
+        ids = [row["bpm_instance_id"] for row in rows]
+
+        for bpm_instance_id in ids:
+
+            try:
+
+                creator.crear_desde_bpm(
+                    bpm_instance_id=bpm_instance_id,
+                    usuario_id=None
+                )
+
+            except Exception as e:
+
+                print(f"Error reprocesando {bpm_instance_id}: {e}")

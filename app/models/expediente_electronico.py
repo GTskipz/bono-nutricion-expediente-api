@@ -30,11 +30,8 @@ class ExpedienteElectronico(Base):
     nombre_beneficiario: Mapped[str | None] = mapped_column(String(255))
     cui_beneficiario: Mapped[str | None] = mapped_column(String(50))
 
-    # ✅ NUEVO: RUB (Registro Único de Beneficiario) - VARCHAR sin limitar formato
     rub: Mapped[str | None] = mapped_column(String(100))
 
-    # ✅ Regla MIS (según tu SQL): NOT NULL
-    # Nota: en tu SQL dijiste que lo manda el frontend, pero dejamos fallback por seguridad.
     anio_carga: Mapped[int] = mapped_column(
         Integer,
         nullable=False,

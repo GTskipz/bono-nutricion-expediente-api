@@ -1,10 +1,10 @@
 from datetime import date
-from fastapi import APIRouter, Depends, UploadFile, File, Form, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile, File, Form, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.core.auth import AuthContext, require_auth_context
-from app.core.db import get_db
+from app.core.db import SessionLocal, get_db
 from app.services.sesan_service import SesanService
 
 router = APIRouter(prefix="/sesan", tags=["SESAN"])
@@ -82,28 +82,42 @@ def listar_filas_batch(
 @router.post("/batch/{batch_id}/procesar-pendientes")
 async def procesar_pendientes_batch(
     batch_id: int,
+    background_tasks: BackgroundTasks,
     limit: int = Query(200, ge=1, le=2000),
-    db: Session = Depends(get_db),
-    auth: AuthContext = Depends(require_auth_context),  
+    auth: AuthContext = Depends(require_auth_context),
 ):
-    # Extraemos el ID del usuario del contexto de autenticación
-    usuario_id = auth.user.get('id')
-    service = SesanService(db)  # ✅ manteniendo tu estructura
-    # Pasamos el usuario_id al servicio para la trazabilidad en Spiff
-    return await service.procesar_pendientes_batch(batch_id=batch_id, limit=limit, usuario_id=usuario_id)
+
+    usuario_id = auth.user.get("id")
+
+    background_tasks.add_task(
+        SesanService.procesar_pendientes_batch_background,
+        batch_id,
+        limit,
+        usuario_id,
+    )
+
+    return {
+        "mensaje": "Procesamiento iniciado",
+        "batch_id": batch_id,
+        "limit": limit,
+    }
 
 
 @router.post("/row/{row_id}/procesar")
 async def procesar_row(
     row_id: int,
     db: Session = Depends(get_db),
-    auth: AuthContext = Depends(require_auth_context), 
+    auth: AuthContext = Depends(require_auth_context),
 ):
-    # Extraemos el ID del usuario del contexto de autenticación
-    usuario_id = auth.user.get('id')
-    service = SesanService(db=db)  # ✅ manteniendo tu estructura
-    # Pasamos el usuario_id al servicio para crear el expediente con identidad
-    return await service.procesar_row(row_id=row_id, usuario_id=usuario_id)
+
+    usuario_id = auth.user.get("id")
+
+    service = SesanService(db=db)
+
+    return await service.procesar_row(
+        row_id=row_id,
+        usuario_id=usuario_id
+    )
 
 
 @router.post("/batch/{batch_id}/reintentar-errores")
@@ -166,3 +180,27 @@ def obtener_totales_batch(
     db: SesanService = Depends(get_db),
 ):
     return SesanService(db).obtener_totales_batch(batch_id)
+
+
+@router.post("/batch/{batch_id}/reprocesar-esperando-callback")
+def reprocesar_batch(batch_id: int, background_tasks: BackgroundTasks):
+
+    background_tasks.add_task(
+        reprocesar_batch_wrapper,
+        batch_id
+    )
+
+    return {
+        "mensaje": "Reproceso iniciado",
+        "batch_id": batch_id
+    }
+
+def reprocesar_batch_wrapper(batch_id: int):
+
+    db = SessionLocal()
+
+    try:
+        SesanService(db).reprocesar_batch_esperando_callback(batch_id)
+
+    finally:
+        db.close()

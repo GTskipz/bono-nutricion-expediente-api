@@ -109,21 +109,22 @@ class BpmServiceTaskData:
         with_form_data: bool = True,
     ) -> Dict[str, Any]:
         """
-        Recibe bpm_instance_id, resuelve task_guid activo y devuelve task-data.
+        Recibe bpm_instance_id, resuelve task_guid activo y devuelve exactamente
+        la data del task tal como la entrega Spiff.
         """
+
         task_guid = await self._obtener_task_guid_activo(int(bpm_instance_id))
+
         data = await self._get_task_data(
             bpm_instance_id=int(bpm_instance_id),
             task_guid=task_guid,
             process_model_identifier=process_model_identifier,
             with_form_data=with_form_data,
         )
-        return {
-            "bpm_instance_id": int(bpm_instance_id),
-            "task_guid": task_guid,
-            "data": data,
-        }
 
+        # devolver exactamente la respuesta del task
+        return data
+    
     async def obtener_task_data_por_expediente_id(
         self,
         *,

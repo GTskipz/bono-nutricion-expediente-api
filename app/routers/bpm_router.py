@@ -8,6 +8,7 @@ from app.bpm.bpm_client import BpmClient
 from app.core.db import get_db
 from app.bpm.bpm_service_task_data import BpmServiceTaskData
 from app.bpm.bpm_client import BpmClient
+from app.services.sesan_expediente_service import SesanExpedienteCreator
 
 router = APIRouter(prefix="/bpm", tags=["BPM"])
 
@@ -122,13 +123,48 @@ async def get_task_data_por_instancia(
             bpm_instance_id=bpm_instance_id
         )
 
-        return {
-            "bpm_instance_id": bpm_instance_id,
-            "data": result,
-        }
+        # devolver exactamente lo que regresa el servicio
+        return result
 
     except Exception as e:
         raise HTTPException(
             status_code=502,
             detail=f"Error consultando task data BPM por instancia: {str(e)}",
+        )
+    
+@router.post("/crear-expediente-desde-bpm")
+def crear_expediente_desde_bpm(payload: dict):
+
+    bpm_instance_id = payload.get("bpm_instance_id")
+    usuario_id = payload.get("usuario_id")
+
+    if not bpm_instance_id:
+        raise HTTPException(
+            status_code=400,
+            detail="bpm_instance_id es requerido"
+        )
+
+    service = SesanExpedienteCreator()
+
+    try:
+
+        result = service.crear_desde_bpm(
+            bpm_instance_id=bpm_instance_id,
+            usuario_id=usuario_id
+        )
+
+        return result
+
+    except ValueError as e:
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(e)
+        )
+
+    except Exception as e:
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error creando expediente: {str(e)}"
         )

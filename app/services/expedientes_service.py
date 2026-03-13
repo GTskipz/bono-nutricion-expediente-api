@@ -152,7 +152,7 @@ def crear_expediente_core(payload: ExpedienteCreate, db: Session) -> ExpedienteE
         db.add(ig)
 
     try:
-        db.commit()
+        db.flush()
     except IntegrityError as ie:
         db.rollback()
         msg = str(ie).lower()
@@ -255,13 +255,28 @@ def obtener_expediente_detalle(db: Session, expediente_id: int) -> ExpedienteEle
     docs = getattr(exp, "docs_required_status", None)
     exp.docs_required_state = "COMPLETO" if isinstance(docs, dict) and docs.get("completo") is True else "PENDIENTE"
 
+    bpm_vars = getattr(exp, "bpm_variables", None)
+
+    exp.validaciones = None
+
+    if isinstance(bpm_vars, dict):
+
+        validaciones = bpm_vars.get("validaciones")
+
+        if isinstance(validaciones, dict):
+
+            exp.validaciones = {
+                "beneficiario": validaciones.get("beneficiario"),
+                "madre": validaciones.get("madre"),
+                "padre": validaciones.get("padre"),
+            }
+
     return exp
 
 
 # =====================================================
 # SEARCH (BANDEJA)
 # =====================================================
-
 def buscar_expedientes(db: Session, payload: ExpedienteSearchRequest) -> ExpedienteSearchResponse:
     texto = (payload.texto or "").strip()
 
@@ -272,6 +287,9 @@ def buscar_expedientes(db: Session, payload: ExpedienteSearchRequest) -> Expedie
     buscar_dpi = BuscarPor.DPI in payload.buscar_por
 
     filters = []
+
+    if payload.anio_carga is not None:
+        filters.append(ExpedienteElectronico.anio_carga == payload.anio_carga)
 
     if not payload.traer_todos:
         text_filters = []
@@ -287,12 +305,7 @@ def buscar_expedientes(db: Session, payload: ExpedienteSearchRequest) -> Expedie
 
         filters.append(or_(*text_filters))
 
-    total_q = db.query(func.count(ExpedienteElectronico.id))
-    if filters:
-        total_q = total_q.filter(*filters)
-    total = total_q.scalar() or 0
-
-    offset = (payload.page - 1) * payload.limit
+    #offset = (payload.page - 1) * payload.limit
 
     q = (
         db.query(
@@ -323,10 +336,10 @@ def buscar_expedientes(db: Session, payload: ExpedienteSearchRequest) -> Expedie
 
     rows = (
         q.order_by(ExpedienteElectronico.created_at.desc())
-        .offset(offset)
-        .limit(payload.limit)
         .all()
     )
+
+    total = len(rows)  # CAMBIO (antes estaba arriba)
 
     data = [
         ExpedienteSearchItem(
@@ -347,7 +360,12 @@ def buscar_expedientes(db: Session, payload: ExpedienteSearchRequest) -> Expedie
         for r in rows
     ]
 
-    return ExpedienteSearchResponse(data=data, page=payload.page, limit=payload.limit, total=total)
+    return ExpedienteSearchResponse(
+        data=data,
+        page=payload.page,
+        limit=payload.limit,
+        total=total
+    )
 
 def buscar_persona_expedientes_service(db: Session, payload: PersonaExpedienteRequest):
 

@@ -28,8 +28,8 @@ from app.routers.sesan_documentos import router as sesan_documentos
 from app.routers.bandejas import router as bandejas
 from app.routers.cuentas_bancarias import router as cuentas_bancarias
 from app.routers.pagos import router as pagos
+from app.routers.incidencia_expediente_router import router as incidencia_expediente_router
 
-# 1. Importar el nuevo router de Archivos (MinIO)
 from app.routers.archivos import router as archivos_router
 
 # =====================================================
@@ -120,6 +120,7 @@ app.include_router(archivos_router)
 app.include_router(bandejas)
 app.include_router(cuentas_bancarias)
 app.include_router(pagos)
+app.include_router(incidencia_expediente_router)
 
 # =====================================================
 # Endpoints base

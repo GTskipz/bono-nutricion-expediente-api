@@ -94,6 +94,9 @@ class ExpedienteOut(BaseModel):
     municipio_id: Optional[int] = None
     estado_expediente: str
 
+    # 🟢 NUEVO
+    validaciones: Optional[Dict[str, Any]] = None
+
     # ✅ NUEVO: nombres de territorio
     departamento: Optional[str] = None
     municipio: Optional[str] = None
@@ -124,7 +127,7 @@ class ExpedienteSearchRequest(BaseModel):
         default_factory=lambda: [BuscarPor.NOMBRE, BuscarPor.DPI]
     )
     traer_todos: bool = False
-
+    anio_carga: int | None = None
     page: int = Field(default=1, ge=1)
     limit: int = Field(default=10, ge=1, le=50)
 
