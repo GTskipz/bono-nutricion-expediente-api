@@ -94,7 +94,7 @@ class ExpedienteOut(BaseModel):
     municipio_id: Optional[int] = None
     estado_expediente: str
 
-    # 🟢 NUEVO
+    # 🟢 NUEVO (Jonathan)
     validaciones: Optional[Dict[str, Any]] = None
 
     # ✅ NUEVO: nombres de territorio
@@ -127,7 +127,15 @@ class ExpedienteSearchRequest(BaseModel):
         default_factory=lambda: [BuscarPor.NOMBRE, BuscarPor.DPI]
     )
     traer_todos: bool = False
-    anio_carga: int | None = None
+    anio_carga: int | None = None  # (Jonathan)
+
+    # 🟢 NUEVOS CAMPOS PARA FILTRADO DINÁMICO (Carlos)
+    # Estos permitirán que el Service reciba la info del Token
+    departamento_id: Optional[int] = None
+    municipio_id: Optional[int] = None
+    geo_scope: Optional[str] = None
+    geo_level: Optional[str] = None
+
     page: int = Field(default=1, ge=1)
     limit: int = Field(default=10, ge=1, le=50)
 

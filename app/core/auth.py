@@ -18,6 +18,9 @@ class AuthContext:
     raw_authorization: Optional[str] = None
     user: Optional[Dict[str, Any]] = None
     roles: List[str] = None
+    # AGREGAMOS ESTOS DOS:
+    geo_scope: Optional[str] = None
+    geo_level: Optional[str] = None
 
 
 def parse_authorization_header(
@@ -82,6 +85,9 @@ def require_auth_context(request: Request) -> AuthContext:
         user_id = payload.get("sub")
         username = payload.get("preferred_username")
         roles = payload.get("realm_access", {}).get("roles", [])
+        # 🟢 EXTRAEMOS LOS NUEVOS CAMPOS DEL JWT
+        geo_scope = payload.get("geo_scope")
+        geo_level = payload.get("geo_level")
 
         if not user_id:
             raise JWTError("El token no contiene el identificador de usuario (sub).")
@@ -108,4 +114,6 @@ def require_auth_context(request: Request) -> AuthContext:
             "claims": payload
         },
         roles=roles,
+        geo_scope=geo_scope, #Nuevo
+        geo_level=geo_level  #Nuevo
     )

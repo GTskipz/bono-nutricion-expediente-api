@@ -1,5 +1,9 @@
 from __future__ import annotations
 from sqlite3 import IntegrityError
+# ... (tus otros imports)
+from app.core.auth import require_auth_context, AuthContext # 🟢 Importamos el Token
+from app.models.cat_departamento import CatDepartamento    # 🟢 Para traducir Código -> ID
+from app.models.cat_municipio import CatMunicipio          # 🟢 Para traducir Código -> ID
 
 from fastapi import (
     APIRouter,
@@ -88,8 +92,35 @@ def buscar_expedientes_endpoint(payload: ExpedienteSearchRequest, db: Session = 
 
 
 @router.post("/bandeja", response_model=ExpedienteSearchResponse)
-def bandeja_asignados(payload: ExpedienteSearchRequest, db: Session = Depends(get_db)):
+def bandeja_asignados(
+    payload: ExpedienteSearchRequest, 
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(require_auth_context) # 🟢 Inyectamos el Token de Keycloak
+):
     payload.traer_todos = True
+
+    # ==========================================================================
+    # TRADUCCIÓN DE TOKEN A FILTROS DE BASE DE DATOS
+    # ==========================================================================
+    if auth.geo_scope and auth.geo_level == "municipal":
+        # geo_scope viene como "GT-05-0501"
+        parts = auth.geo_scope.split("-")
+        if len(parts) == 3:
+            cod_muni_raw = parts[2] # "0501"
+            
+            # Limpiamos el código: Si empieza con '0', quitamos el primer caracter
+            # "0501" se convierte en "501" para coincidir con tu BD
+            cod_muni_clean = cod_muni_raw[1:] if cod_muni_raw.startswith("0") else cod_muni_raw
+            
+            # Buscamos el ID real (51) usando el Código oficial (501)
+            muni = db.query(CatMunicipio).filter(CatMunicipio.codigo == cod_muni_clean).first()
+            if muni:
+                payload.municipio_id = muni.id # 🟢 Inyectamos el ID 51 automáticamente
+                payload.departamento_id = muni.departamento_id
+    # ==========================================================================
+    # FIN DE TRADUCCIÓN
+    # ==========================================================================
+
     return buscar_expedientes(db, payload)
 
 
