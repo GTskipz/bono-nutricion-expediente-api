@@ -280,6 +280,7 @@ def obtener_expediente_detalle(db: Session, expediente_id: int) -> ExpedienteEle
 def buscar_expedientes(db: Session, payload: ExpedienteSearchRequest) -> ExpedienteSearchResponse:
     texto = (payload.texto or "").strip()
 
+   
     if not payload.traer_todos and texto == "":
         return ExpedienteSearchResponse(data=[], page=payload.page, limit=payload.limit, total=0)
 
@@ -288,15 +289,22 @@ def buscar_expedientes(db: Session, payload: ExpedienteSearchRequest) -> Expedie
 
     filters = []
 
+    
     if payload.anio_carga is not None:
         filters.append(ExpedienteElectronico.anio_carga == payload.anio_carga)
 
+    
+    # FILTRADO TERRITORIAL
+    if getattr(payload, "departamento_id", None):
+        filters.append(ExpedienteElectronico.departamento_id == payload.departamento_id)
+    
+    if getattr(payload, "municipio_id", None):
+        filters.append(ExpedienteElectronico.municipio_id == payload.municipio_id)
+    
     if not payload.traer_todos:
         text_filters = []
-
         if buscar_nombre:
             text_filters.append(ExpedienteElectronico.nombre_beneficiario.ilike(f"%{texto}%"))
-
         if buscar_dpi:
             text_filters.append(ExpedienteElectronico.cui_beneficiario.like(f"{texto}%"))
 
@@ -305,7 +313,9 @@ def buscar_expedientes(db: Session, payload: ExpedienteSearchRequest) -> Expedie
 
         filters.append(or_(*text_filters))
 
-    #offset = (payload.page - 1) * payload.limit
+    # Paginación Eficiente Mejora
+    # Esto evita que el servidor se trabe si hay miles de registros
+    offset = (payload.page - 1) * payload.limit
 
     q = (
         db.query(
@@ -316,17 +326,12 @@ def buscar_expedientes(db: Session, payload: ExpedienteSearchRequest) -> Expedie
             ExpedienteElectronico.estado_expediente,
             ExpedienteElectronico.bpm_status,
             ExpedienteElectronico.bpm_current_task_name,
-
             CatEstadoFlujoExpediente.codigo.label("estado_flujo_codigo"),
             CatEstadoFlujoExpediente.nombre.label("estado_flujo_nombre"),
-
             CatDepartamento.nombre.label("departamento"),
             CatMunicipio.nombre.label("municipio"),
         )
-        .outerjoin(
-            CatEstadoFlujoExpediente,
-            CatEstadoFlujoExpediente.id == ExpedienteElectronico.estado_flujo_id,
-        )
+        .outerjoin(CatEstadoFlujoExpediente, CatEstadoFlujoExpediente.id == ExpedienteElectronico.estado_flujo_id)
         .outerjoin(CatDepartamento, CatDepartamento.id == ExpedienteElectronico.departamento_id)
         .outerjoin(CatMunicipio, CatMunicipio.id == ExpedienteElectronico.municipio_id)
     )
@@ -334,12 +339,17 @@ def buscar_expedientes(db: Session, payload: ExpedienteSearchRequest) -> Expedie
     if filters:
         q = q.filter(*filters)
 
+    # Conteo y obtención de filas con límite (Paginación real)
+    # Primero se cuentan cuántos hay en total para el total de la respuesta
+    total = q.count() 
+
+    # Despues se obtiene solo los 10 o 20 que corresponden a la página actual
     rows = (
         q.order_by(ExpedienteElectronico.created_at.desc())
+        .offset(offset)
+        .limit(payload.limit)
         .all()
     )
-
-    total = len(rows)  # CAMBIO (antes estaba arriba)
 
     data = [
         ExpedienteSearchItem(
@@ -350,10 +360,8 @@ def buscar_expedientes(db: Session, payload: ExpedienteSearchRequest) -> Expedie
             estado_expediente=r.estado_expediente,
             bpm_status=r.bpm_status,
             bpm_current_task_name=r.bpm_current_task_name,
-
             estado_flujo_codigo=getattr(r, "estado_flujo_codigo", None),
             estado_flujo_nombre=getattr(r, "estado_flujo_nombre", None),
-
             departamento=r.departamento,
             municipio=r.municipio,
         )
