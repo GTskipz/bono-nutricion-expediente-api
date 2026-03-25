@@ -69,5 +69,9 @@ class DocumentosYAnexos(Base):
     checksum_sha256: Mapped[str | None] = mapped_column(String(80))
 
     subido_por: Mapped[str | None] = mapped_column(String(255))
+    
+    #Se agrega la columna para el nombre del usuario (Auditoría Visual)
+    subido_por_nombre: Mapped[str | None] = mapped_column(String(255)) 
+    
     observacion: Mapped[str | None] = mapped_column(Text)
     descripcion: Mapped[str | None] = mapped_column(String(255))

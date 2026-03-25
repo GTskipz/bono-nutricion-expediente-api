@@ -449,6 +449,7 @@ def listar_documentos_expediente(db: Session, expediente_id: int, tab: str) -> L
             CatTipoDocumento.codigo.label("tipo_documento_codigo"),
             CatTipoDocumento.es_obligatorio.label("es_obligatorio"),
             CatTipoDocumento.orden.label("orden"),
+            DocumentosYAnexos.subido_por_nombre, #Se incluye el nombre del auditor en el listado
         )
         .outerjoin(CatTipoDocumento, CatTipoDocumento.id == DocumentosYAnexos.tipo_documento_id)
         .filter(DocumentosYAnexos.expediente_id == expediente_id)
@@ -469,6 +470,7 @@ def listar_documentos_expediente(db: Session, expediente_id: int, tab: str) -> L
             "tipo_documento_codigo": r.tipo_documento_codigo,
             "es_obligatorio": r.es_obligatorio,
             "orden": r.orden,
+            "subido_por_nombre": r.subido_por_nombre, #Se devuelve al Front
         }
         for r in rows
     ]
@@ -495,6 +497,8 @@ def upload_documento_por_id_core(
     content: bytes,
     observacion: Optional[str] = None,
     descripcion: Optional[str] = None,
+    usuario_nombre: Optional[str] = None, #Nuevo parámetro de auditoría visual
+    usuario_id: Optional[str] = None,     #Nuevo parámetro de auditoría técnica
 ) -> Dict[str, Any]:
     _assert_expediente_exists(db, expediente_id)
 
@@ -542,7 +546,9 @@ def upload_documento_por_id_core(
     doc.mime_type = mime
     doc.size_bytes = size
     doc.checksum_sha256 = checksum
-    doc.subido_por = "pendiente"
+    #Se elimina el valor "pendiente" hardcodeado y se asigna la auditoría real del token/front
+    doc.subido_por = usuario_id or "desconocido"
+    doc.subido_por_nombre = usuario_nombre 
     doc.observacion = observacion
     doc.descripcion = descripcion
     doc.updated_at = datetime.utcnow()
@@ -554,7 +560,8 @@ def upload_documento_por_id_core(
         titulo="Documentos subidos",
         origen=TrackingEventoService.ORIGEN_DOCUMENTOS,
         tipo_evento=TrackingEventoService.DOCS_SUBIDOS,
-        usuario=None,
+        # CORRECCIÓN UX: Se usa usuario_nombre para la cabecera y se limpia la observación (sin el "Por: facilitador" redundante)
+        usuario=usuario_nombre,
         observacion=f"{doc.tab} | DocID {doc.id} | {filename}",
         commit=False,
     )
@@ -576,6 +583,7 @@ def upload_documento_por_id_core(
         "storage_key": doc.storage_key,
         "checksum_sha256": doc.checksum_sha256,
         "updated_at": doc.updated_at,
+        "subido_por_nombre": doc.subido_por_nombre #Se devuelve al Front
     }
 
 def upload_documento_por_tipo_core(
@@ -588,6 +596,8 @@ def upload_documento_por_tipo_core(
     content: bytes,
     observacion: Optional[str] = None,
     descripcion: Optional[str] = None,
+    usuario_nombre: Optional[str] = None, #Auditoría visual
+    usuario_id: Optional[str] = None,     #Auditoría técnica
 ) -> Dict[str, Any]:
     _assert_expediente_exists(db, expediente_id)
 
@@ -655,7 +665,11 @@ def upload_documento_por_tipo_core(
     doc.mime_type = mime
     doc.size_bytes = size
     doc.checksum_sha256 = checksum
-    doc.subido_por = "pendiente"
+    
+    #Se elimina el valor "pendiente" hardcodeado y se asigna la auditoría real del token/front
+    doc.subido_por = usuario_id or "desconocido"
+    doc.subido_por_nombre = usuario_nombre
+    
     doc.observacion = observacion
     doc.descripcion = descripcion
     doc.updated_at = datetime.utcnow()
@@ -667,7 +681,8 @@ def upload_documento_por_tipo_core(
         titulo="Documentos subidos",
         origen=TrackingEventoService.ORIGEN_DOCUMENTOS,
         tipo_evento=TrackingEventoService.DOCS_SUBIDOS,
-        usuario=None,
+        # Se usa usuario_nombre para la cabecera 
+        usuario=usuario_nombre,
         observacion=f"{tab} | Tipo {tipo.codigo or tipo_documento_id} | {filename}",
         commit=False,
     )
@@ -689,6 +704,7 @@ def upload_documento_por_tipo_core(
         "storage_key": doc.storage_key,
         "checksum_sha256": doc.checksum_sha256,
         "updated_at": doc.updated_at,
+        "subido_por_nombre": doc.subido_por_nombre #Se devuelve al Front
     }
 
 
@@ -932,7 +948,7 @@ def pasar_a_docs_verificados(db: Session, expediente_id: int):
         expediente_id=int(expediente_id),
         titulo="Documentos verificados",
         origen=TrackingEventoService.ORIGEN_DOCUMENTOS,
-        tipo_evento=TrackingEventoService.DOCS_VERIFICADOS,
+        tipo_evento="DOCS_VERIFICADOS",
         usuario=None,
         observacion=None,
         commit=False,

@@ -147,10 +147,15 @@ async def upload_documento_por_id(
     file: UploadFile = File(...),
     observacion: str | None = Form(None),
     descripcion: str | None = Form(None),
+    usuario_nombre: str | None = Form(None), #Se recibe el nombre del usuario desde el Form del Frontend
     db: Session = Depends(get_db),
+    auth: AuthContext = Depends(require_auth_context), #Se inyecta contexto para auditoría real
 ):
     if not file or not file.filename:
         raise HTTPException(status_code=400, detail="Archivo inválido.")
+
+    #Se extrae el ID del usuario del token para mayor seguridad
+    usuario_id = auth.user.get("id") if auth else None
 
     content = await file.read()
     return upload_documento_por_id_core(
@@ -162,6 +167,8 @@ async def upload_documento_por_id(
         content=content,
         observacion=observacion,
         descripcion=descripcion,
+        usuario_nombre=usuario_nombre, #Se pasa al core
+        usuario_id=usuario_id,         #Se pasa al core
     )
 
 
@@ -173,10 +180,15 @@ async def upload_documento_por_tipo(
     tipo_documento_id: int = Form(...),
     observacion: str | None = Form(None),
     descripcion: str | None = Form(None),
+    usuario_nombre: str | None = Form(None), #Se recibe el nombre del usuario desde el Form del Frontend
     db: Session = Depends(get_db),
+    auth: AuthContext = Depends(require_auth_context), #Se inyecta contexto para auditoría real
 ):
     if not file or not file.filename:
         raise HTTPException(status_code=400, detail="Archivo inválido.")
+
+    #Se extrae el ID del usuario del token para mayor seguridad
+    usuario_id = auth.user.get("id") if auth else None
 
     content = await file.read()
     return upload_documento_por_tipo_core(
@@ -189,6 +201,8 @@ async def upload_documento_por_tipo(
         content=content,
         observacion=observacion,
         descripcion=descripcion,
+        usuario_nombre=usuario_nombre, #Se pasa al core
+        usuario_id=usuario_id,         #Se pasa al core
     )
 
 
