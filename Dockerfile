@@ -27,9 +27,17 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 # Instalamos la librería necesaria para conectarse a Postgres (libpq5)
+# -------------------------------------------------------------------------
+# CAMBIO REALIZADO: Se añade libreoffice y fuentes para conversión fiel de DOCX a PDF (Requerimiento 28)
+# -------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
+    libreoffice-writer \
+    libreoffice-java-common \
+    fonts-dejavu \
+    fontconfig \
     && rm -rf /var/lib/apt/lists/*
+# -------------------------------------------------------------------------
 
 # Copiamos lo compilado del stage anterior
 COPY --from=builder /app/wheels /wheels
@@ -41,6 +49,8 @@ COPY ./app ./app
 
 # Seguridad (Usuario no root)
 RUN addgroup --system appgroup && adduser --system --group appuser
+# Nota: LibreOffice puede requerir permisos de escritura en carpetas temporales, 
+# el usuario appuser suele ser suficiente.
 USER appuser
 
 EXPOSE 8000

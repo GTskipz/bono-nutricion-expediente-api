@@ -1,5 +1,6 @@
 from sqlalchemy.orm import Session
 from app.utils.docx_template import replace_placeholders_docx_bytes
+from app.utils.docx_to_pdf import docx_bytes_to_pdf_bytes
 
 from app.models.expediente_electronico import ExpedienteElectronico
 from app.models.info_general import InfoGeneral
@@ -54,3 +55,20 @@ def generar_carta_aceptacion_docx_bytes(expediente_id: int, db: Session) -> tupl
     filename = f"Carta_Aceptacion_{rub}.docx"
 
     return docx_bytes, filename
+
+# Generación PDF con negritas)
+def generar_carta_aceptacion_pdf_bytes(expediente_id: int, db: Session) -> tuple[bytes, str]:
+    """
+    Genera el documento Word con los reemplazos y negritas aplicadas, 
+    y lo convierte a PDF antes de retornar los bytes.
+    """
+    # 1. Generamos el DOCX usando la lógica existente (que ya aplica negritas en la utilidad template)
+    docx_bytes, filename_docx = generar_carta_aceptacion_docx_bytes(expediente_id, db)
+    
+    # 2. Convertimos los bytes de DOCX a PDF usando la utilidad que soporta negritas
+    pdf_bytes = docx_bytes_to_pdf_bytes(docx_bytes)
+    
+    # 3. Generamos el nombre del archivo con extensión .pdf
+    filename_pdf = filename_docx.replace(".docx", ".pdf")
+    
+    return pdf_bytes, filename_pdf

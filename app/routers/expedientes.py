@@ -38,7 +38,7 @@ from app.services.expedientes_service import (
     obtener_expediente_detalle,
     buscar_expedientes,
     listar_documentos_expediente,
-    pasar_a_gestion,
+    pasar_a_gestion, 
     validar_tab,
     upload_documento_por_id_core,
     upload_documento_por_tipo_core,
@@ -59,7 +59,15 @@ from app.services.expediente_contacto_service import (
     upsert_contacto_expediente,
 )
 
-from app.services.documentos.carta_aceptacion import generar_carta_aceptacion_docx_bytes
+# -------------------------------------------------------------------------
+# ✅ CAMBIO PARA REQUERIMIENTO 28: Se importa la función de PDF que creamos en el service
+# -------------------------------------------------------------------------
+from app.services.documentos.carta_aceptacion import (
+    generar_carta_aceptacion_docx_bytes,
+    generar_carta_aceptacion_pdf_bytes 
+)
+# -------------------------------------------------------------------------
+
 from app.utils.docx_to_pdf import docx_bytes_to_pdf_bytes
 
 from app.bpm.bpm_service_task_titular import BpmServiceTaskTitular
@@ -224,33 +232,26 @@ def listar_tracking_expediente(
     return listar_tracking_expediente_core(db, expediente_id)
 
 
-@router.get("/{expediente_id}/documentos/carta-aceptacion.docx")
-def descargar_carta_docx(expediente_id: int, db: Session = Depends(get_db)):
-    try:
-        content, filename = generar_carta_aceptacion_docx_bytes(expediente_id, db)
-        return Response(
-            content=content,
-            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
-
 @router.get("/{expediente_id}/documentos/carta-aceptacion.pdf")
 def descargar_carta_pdf(expediente_id: int, db: Session = Depends(get_db)):
     try:
-        docx_bytes, docx_name = generar_carta_aceptacion_docx_bytes(expediente_id, db)
-        pdf_bytes = docx_bytes_to_pdf_bytes(docx_bytes)
-        pdf_name = docx_name.replace(".docx", ".pdf")
+        # Se usa generar_carta_aceptacion_pdf_bytes (Service)
+        # Esto asegura que se apliquen las negritas y la conversión correctamente.
+        pdf_bytes, pdf_name = generar_carta_aceptacion_pdf_bytes(expediente_id, db)
 
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="{pdf_name}"'},
+            headers={
+                "Content-Disposition": f'attachment; filename="{pdf_name}"',
+                "Access-Control-Expose-Headers": "Content-Disposition"
+            },
         )
+        # -------------------------------------------------------------------------
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generando PDF: {str(e)}")
 
 @router.post("/{expediente_id}/titular")
 async def registrar_titular(
@@ -366,12 +367,12 @@ def buscar_persona_expedientes(
 @router.get("/{expediente_id}/cuenta-corriente")
 def obtener_cuenta_corriente(
     expediente_id: int,
-    anio: int | None = None,  
+    anio: int | None = None,
     db: Session = Depends(get_db),
 ):
 
     return obtener_cuenta_corriente_expediente(
         db,
         expediente_id=expediente_id,
-        anio=anio,  
+        anio=anio,
     )

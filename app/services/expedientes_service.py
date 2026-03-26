@@ -14,9 +14,11 @@ from sqlalchemy import case, func, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+# ✅ NUEVOS MODELOS (Jonathan)
 from app.models.cat_area_salud import CatAreaSalud
 from app.models.cat_distrito_salud import CatDistritoSalud
 from app.models.cat_servicio_salud import CatServicioSalud
+
 from app.models.expediente_electronico import ExpedienteElectronico
 from app.models.info_general import InfoGeneral
 from app.models.documentos_y_anexos import DocumentosYAnexos
@@ -222,7 +224,7 @@ def obtener_expediente_detalle(db: Session, expediente_id: int) -> ExpedienteEle
     ig = db.query(InfoGeneral).filter(InfoGeneral.expediente_id == exp.id).first()
     exp.info_general = ig
 
-    # ✅ NUEVO: salud
+    # ✅ NUEVO (Jonathan): salud
     if ig:
         area = None
         distrito = None
@@ -307,6 +309,7 @@ def obtener_expediente_detalle(db: Session, expediente_id: int) -> ExpedienteEle
             }
 
     return exp
+
 
 # =====================================================
 # SEARCH (BANDEJA)
@@ -991,6 +994,7 @@ def pasar_a_docs_verificados(db: Session, expediente_id: int):
     db.commit()
     return dict(row)
 
+# ✅ CAMBIO REALIZADO (Jonathan): Marcar expediente en gestión
 def pasar_a_gestion(db: Session, expediente_id: int):
     row = db.execute(
         text("""
@@ -1026,7 +1030,7 @@ def pasar_a_gestion(db: Session, expediente_id: int):
     db.commit()
     return dict(row)
 
-
+# ✅ CAMBIO REALIZADO (Jonathan): Filtro por año opcional en cuenta corriente
 def obtener_cuenta_corriente_expediente(
     db: Session,
     *,
