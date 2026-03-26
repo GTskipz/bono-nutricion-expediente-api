@@ -75,6 +75,13 @@ class InfoGeneralOut(InfoGeneralIn):
 
     model_config = ConfigDict(from_attributes=True)
 
+class SaludOut(BaseModel):
+    area_salud_id: Optional[int] = None
+    area_salud_nombre: Optional[str] = None
+    distrito_salud_id: Optional[int] = None
+    distrito_salud_nombre: Optional[str] = None
+    servicio_salud_id: Optional[int] = None
+    servicio_salud_nombre: Optional[str] = None
 
 class ExpedienteOut(BaseModel):
     id: int
@@ -108,6 +115,8 @@ class ExpedienteOut(BaseModel):
     info_general: Optional[InfoGeneralOut] = None
 
     contacto: Optional[ExpedienteContactoOut] = None
+
+    salud: Optional[SaludOut] = None
 
     model_config = ConfigDict(from_attributes=True)
 

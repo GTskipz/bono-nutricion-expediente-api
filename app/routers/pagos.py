@@ -8,9 +8,14 @@ from app.core.db import get_db
 
 from app.services.pagos_service import (
     bandeja_expedientes_con_cuenta,
+    generar_excel_beneficiarios_pago,
+    generar_excel_lote_pago,
+    generar_txt_detalle_lote,
+    generar_txt_resumen_lote,
     listar_lotes_pago,
     obtener_lote_pago,
     listar_items_lote_pago,
+    obtener_totales_beneficiarios_pago,
     preview_detalle_lote_pago,
     procesar_lote_pago_simulado,
     generar_excel_lote_pago_export_bytes,
@@ -22,6 +27,7 @@ from app.services.pagos_service import (
 )
 
 from app.schemas.pagos import (
+    ExportBeneficiariosRequest,
     LotePagoPreviewRequest,
     LotePagoCrearPorFiltrosRequest,
     LotePagoCrearResponse,
@@ -68,7 +74,8 @@ def crear_lote_por_filtros(
         monto_por_persona=payload.monto_por_persona,
         tope_anual_persona=payload.tope_anual_persona,
         presupuesto_total=payload.presupuesto_total,
-        filtros=payload.filtros,
+        numero_pago=payload.numero_pago,
+        ubicaciones=payload.ubicaciones,
         creado_por=None,
         observacion=payload.observacion,
     )
@@ -186,3 +193,65 @@ def preview_detalle(
         page=page,
         limit=limit,
     )
+
+# ===============================
+# PREVIEW TOTALES
+# ===============================
+@router.post("/preview/totales")
+def preview_totales(
+    payload: ExportBeneficiariosRequest,
+    db: Session = Depends(get_db),
+):
+    return obtener_totales_beneficiarios_pago(
+        db,
+        numero_pago=payload.numero_pago,
+        ubicaciones=payload.ubicaciones,
+    )
+
+@router.post("/beneficiarios/export/excel")
+def export_beneficiarios_excel(
+    payload: ExportBeneficiariosRequest,
+    db: Session = Depends(get_db),
+):
+    return generar_excel_beneficiarios_pago(
+        db,
+        numero_pago=payload.numero_pago,
+        ubicaciones=payload.ubicaciones,
+    )
+
+
+@router.get("/lotes/{lote_id}/excel")
+def descargar_excel_lote_pago(lote_id: int, db: Session = Depends(get_db)):
+
+    file = generar_excel_lote_pago(db, lote_id=lote_id)
+
+    return StreamingResponse(
+        file,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename=planilla_lote_{lote_id}.xlsx"
+        },
+    )
+
+# =====================================================
+# 📄 RESUMEN CSV
+# =====================================================
+@router.get("/lotes/{lote_id}/resumen-csv")
+def descargar_resumen_lote(
+    lote_id: int,
+    db: Session = Depends(get_db),
+):
+    response = generar_txt_resumen_lote(db, lote_id=lote_id)
+    response.media_type = "text/csv"
+    response.headers["Content-Disposition"] = f"attachment; filename=resumen_lote_{lote_id}.csv"
+    return response
+
+# =====================================================
+# 📄 DETALLE CSV (POR BENEFICIARIO)
+# =====================================================
+@router.get("/lotes/{lote_id}/detalle-csv")
+def descargar_detalle_lote(
+    lote_id: int,
+    db: Session = Depends(get_db),
+):
+    return generar_txt_detalle_lote(db, lote_id=lote_id)

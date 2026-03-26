@@ -285,9 +285,7 @@ class SesanService:
         from fastapi import HTTPException
 
         from app.services.sesan_batch_documentos_service import crear_placeholders_docs_requeridos
-        # De tu módulo excel utils (ya lo modificamos):
-        # - iter_sesan_xlsx_rows(file_path)
-        from app.services.excel_reader import iter_sesan_xlsx_rows  # <-- ajusta al path real donde lo dejaste
+        from app.services.excel_reader import iter_sesan_xlsx_rows, validar_excel_sesan 
 
         try:
             # =====================================================
@@ -345,6 +343,11 @@ class SesanService:
                 print("Cliente MinIO no disponible, usando FTP simulado")
                 storage_provider = "ftp"
                 storage_key = f"ftp://PENDIENTE/sesan/{ts}_{safe_name}"
+
+            # =====================================================
+            # 🔍 VALIDACIÓN DEL EXCEL (ANTES DE TODO)
+            # =====================================================
+            header_row = validar_excel_sesan(tmp_path)
 
             # =====================================================
             # 4) Insert sesan_batch (igual que antes)

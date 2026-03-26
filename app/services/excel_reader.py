@@ -217,3 +217,76 @@ def read_sesan_xlsx_rows(file_path: str) -> list[dict]:
     ⚠️ Para archivos grandes, usa iter_sesan_xlsx_rows() directamente.
     """
     return list(iter_sesan_xlsx_rows(file_path))
+
+# =====================================================
+# ✅ Valida el documento antes de correr por el 
+# =====================================================
+def validar_excel_sesan(file_path: str):
+    try:
+        wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+        ws = wb.active
+
+        header_row = find_header_row_iter(ws)
+
+        if not header_row:
+            raise HTTPException(
+                status_code=422,
+                detail="No se encontraron encabezados válidos en el archivo Excel."
+            )
+
+        # Validar columnas mínimas reales
+        headers = next(
+            ws.iter_rows(
+                min_row=header_row,
+                max_row=header_row,
+                values_only=True
+            )
+        )
+
+        headers_norm = {norm_header(h) for h in headers if h}
+
+        required = {
+            "#",
+            "AÑO",
+            "MES",
+            "ÁREA DE SALUD",
+            "DISTRITO DE SALUD",
+            "SERVICIO DE SALUD",
+            "DEPARTAMENTO DE RESIDENCIA",
+            "MUNICIPIO DE RESIDENCIA",
+            "COMUNIDAD RESIDENCIA",
+            "DIRECCIÓN RESIDENCIA",
+            "CUI DEL NIÑO",
+            "SEXO",
+            "EDAD EN AÑOS",
+            "NOMBRE DEL NIÑO",
+            "FECHA NACIMIENTO",
+            "FECHA DEL PRIMER CONTACTO",
+            "FECHA DE REGISTRO",
+            "CIE-10",
+            "DIAGNÓSTICO",
+            "NOMBRE DE LA MADRE",
+            "CUI DE LA MADRE",
+            "NOMBRE DEL PADRE",
+            "CUI DEL PADRE",
+            "TELÉFONOS ENCARGADOS",
+            "VALIDACION",
+        }
+
+        faltantes = [r for r in required if r not in headers_norm]
+
+        if faltantes:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Faltan columnas requeridas: {', '.join(faltantes)}"
+            )
+
+        return header_row
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Error leyendo Excel: {str(e)}"
+        )

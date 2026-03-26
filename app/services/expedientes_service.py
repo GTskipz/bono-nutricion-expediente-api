@@ -14,6 +14,9 @@ from sqlalchemy import case, func, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.models.cat_area_salud import CatAreaSalud
+from app.models.cat_distrito_salud import CatDistritoSalud
+from app.models.cat_servicio_salud import CatServicioSalud
 from app.models.expediente_electronico import ExpedienteElectronico
 from app.models.info_general import InfoGeneral
 from app.models.documentos_y_anexos import DocumentosYAnexos
@@ -219,6 +222,38 @@ def obtener_expediente_detalle(db: Session, expediente_id: int) -> ExpedienteEle
     ig = db.query(InfoGeneral).filter(InfoGeneral.expediente_id == exp.id).first()
     exp.info_general = ig
 
+    # ✅ NUEVO: salud
+    if ig:
+        area = None
+        distrito = None
+        servicio = None
+
+        if ig.area_salud_id:
+            area = db.query(CatAreaSalud.nombre).filter(
+                CatAreaSalud.id == ig.area_salud_id
+            ).scalar()
+
+        if ig.distrito_salud_id:
+            distrito = db.query(CatDistritoSalud.nombre).filter(
+                CatDistritoSalud.id == ig.distrito_salud_id
+            ).scalar()
+
+        if ig.servicio_salud_id:
+            servicio = db.query(CatServicioSalud.nombre).filter(
+                CatServicioSalud.id == ig.servicio_salud_id
+            ).scalar()
+
+        exp.salud = {
+            "area_salud_id": ig.area_salud_id,
+            "area_salud_nombre": area,
+            "distrito_salud_id": ig.distrito_salud_id,
+            "distrito_salud_nombre": distrito,
+            "servicio_salud_id": ig.servicio_salud_id,
+            "servicio_salud_nombre": servicio,
+        }
+    else:
+        exp.salud = None
+
     exp.departamento = departamento
     exp.municipio = municipio
 
@@ -272,7 +307,6 @@ def obtener_expediente_detalle(db: Session, expediente_id: int) -> ExpedienteEle
             }
 
     return exp
-
 
 # =====================================================
 # SEARCH (BANDEJA)
@@ -957,14 +991,50 @@ def pasar_a_docs_verificados(db: Session, expediente_id: int):
     db.commit()
     return dict(row)
 
+def pasar_a_gestion(db: Session, expediente_id: int):
+    row = db.execute(
+        text("""
+            UPDATE expediente_electronico
+            SET estado_flujo_id = (
+                SELECT id
+                FROM cat_estado_flujo_expediente
+                WHERE codigo = 'GESTION'
+                LIMIT 1
+            ),
+            updated_at = NOW()
+            WHERE id = :id
+            RETURNING id, estado_flujo_id
+        """),
+        {"id": expediente_id},
+    ).mappings().first()
+
+    if not row:
+        return None
+
+    # ✅ TRACKING: expediente enviado a gestión
+    TrackingEventoService._registrar(
+        db,
+        expediente_id=int(expediente_id),
+        titulo="Expediente en gestión",
+        origen=TrackingEventoService.ORIGEN_EXPEDIENTE,
+        tipo_evento="EXPEDIENTE_EN_GESTION",
+        usuario=None,
+        observacion="El expediente fue movido a gestión para revisión o corrección.",
+        commit=False,
+    )
+
+    db.commit()
+    return dict(row)
+
+
 def obtener_cuenta_corriente_expediente(
     db: Session,
     *,
     expediente_id: int,
+    anio: int | None = None, 
 ):
 
-    rows = db.execute(
-        text("""
+    query = """
         SELECT
             id,
             expediente_id,
@@ -976,9 +1046,19 @@ def obtener_cuenta_corriente_expediente(
             created_at
         FROM expediente_cuenta_corriente
         WHERE expediente_id = :expediente_id
-        ORDER BY created_at DESC
-        """),
-        {"expediente_id": expediente_id},
+    """
+
+    params = {"expediente_id": expediente_id}
+
+    if anio:
+        query += " AND EXTRACT(YEAR FROM created_at) = :anio"
+        params["anio"] = anio
+
+    query += " ORDER BY created_at DESC"
+
+    rows = db.execute(
+        text(query),
+        params,
     ).fetchall()
 
     data = []
@@ -997,5 +1077,6 @@ def obtener_cuenta_corriente_expediente(
     return {
         "expediente_id": expediente_id,
         "total_movimientos": len(data),
+        "anio": anio, 
         "data": data,
     }

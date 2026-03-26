@@ -38,6 +38,7 @@ from app.services.expedientes_service import (
     obtener_expediente_detalle,
     buscar_expedientes,
     listar_documentos_expediente,
+    pasar_a_gestion,
     validar_tab,
     upload_documento_por_id_core,
     upload_documento_por_tipo_core,
@@ -321,6 +322,13 @@ def verificar_docs(expediente_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Expediente no encontrado")
     return row
 
+@router.post("/{expediente_id}/gestion")
+def marcar_en_gestion(expediente_id: int, db: Session = Depends(get_db)):
+    row = pasar_a_gestion(db, expediente_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Expediente no encontrado")
+    return row
+
 @router.get("/{expediente_id}/contacto", response_model=ExpedienteContactoOut | None)
 def obtener_contacto(expediente_id: int, db: Session = Depends(get_db)):
 
@@ -358,10 +366,12 @@ def buscar_persona_expedientes(
 @router.get("/{expediente_id}/cuenta-corriente")
 def obtener_cuenta_corriente(
     expediente_id: int,
+    anio: int | None = None,  
     db: Session = Depends(get_db),
 ):
 
     return obtener_cuenta_corriente_expediente(
         db,
         expediente_id=expediente_id,
+        anio=anio,  
     )

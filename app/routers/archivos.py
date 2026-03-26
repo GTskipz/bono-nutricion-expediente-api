@@ -127,7 +127,6 @@ def descargar_documento_expediente(
     """
     Descarga un documento individual (DPI, Recibo, etc) desde la tabla documentos_y_anexos.
     """
-    # 1. Buscar la metadata usando el nombre REAL de la tabla
     query = text("""
         SELECT id, storage_key, filename, mime_type, storage_provider 
         FROM documentos_y_anexos 
@@ -136,7 +135,6 @@ def descargar_documento_expediente(
     
     result = db.execute(query, {"id": doc_id}).first()
     
-    # Validaciones de seguridad
     if not result:
         raise HTTPException(status_code=404, detail="Documento no encontrado en la base de datos")
 
@@ -148,34 +146,33 @@ def descargar_documento_expediente(
     if not storage_key:
         raise HTTPException(status_code=404, detail="El registro existe pero no tiene archivo asociado")
 
-    # (Opcional) Verificar que sea de MinIO
     if provider and provider != "MINIO":
-         # Si tienes archivos viejos en FTP o disco local, aquí podrías manejarlos diferente
-         pass 
+        pass 
 
-    # 2. Conectar a MinIO y hacer Streaming
     try:
         bucket_name = os.getenv("MINIO_BUCKET", "almacenamiento-mis")
         
         if not minio_client:
-             raise HTTPException(status_code=500, detail="Servicio de almacenamiento no disponible")
+            raise HTTPException(status_code=500, detail="Servicio de almacenamiento no disponible")
 
-        # Obtenemos el flujo de datos desde MinIO
         data_stream = minio_client.get_object(bucket_name, storage_key)
         
-        # Generamos nombre final si viene nulo
         final_name = filename if filename else f"documento_{doc_id}.dat"
-        
-        # 3. Responder con el archivo
+
+        # ============================
+        # CAMBIO CLAVE AQUÍ
+        # ============================
+        disposition = "inline" if (mime_type and "pdf" in mime_type) else "attachment"
+        # ============================
+
         return StreamingResponse(
             data_stream.stream(32 * 1024),
             media_type=mime_type or "application/octet-stream",
             headers={
-                "Content-Disposition": f'attachment; filename="{final_name}"'
+                "Content-Disposition": f'{disposition}; filename="{final_name}"'
             }
         )
 
     except Exception as e:
         print(f"Error descargando documento {doc_id}: {e}")
-        # Tip: Si MinIO da error "NoSuchKey", significa que el archivo se borró de la bodega pero sigue en la BD
         raise HTTPException(status_code=404, detail="El archivo físico no se encuentra en el servidor")

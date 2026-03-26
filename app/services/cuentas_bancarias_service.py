@@ -196,7 +196,24 @@ def listar_lotes_apertura(
             "id": l.id,
             "estado": l.estado,
             "banco_codigo": l.banco_codigo,
+
+            # Fechas
             "creado_en": l.creado_en,
+            "procesado_en": l.procesado_en,
+
+            # Usuario / metadata
+            "creado_por": l.creado_por,
+            "observacion": l.observacion,
+            "proveedor_servicio": l.proveedor_servicio,
+
+            # Archivos
+            "archivo_solicitud_id": l.archivo_solicitud_id,
+            "archivo_respuesta_id": l.archivo_respuesta_id,
+
+            # Métricas (si tienes relación items)
+            "total_items": len(l.items) if l.items else 0,
+            "cuentas_creadas": len([i for i in l.items if i.estado == "CUENTA_CREADA"]) if l.items else 0,
+            "rechazados": len([i for i in l.items if i.estado == "RECHAZADO"]) if l.items else 0,
         })
 
     return {"data": data, "page": page, "limit": limit, "total": total}
@@ -309,6 +326,12 @@ def procesar_respuesta_banco_excel(
         .first()
     )
 
+    estado_gestion = (
+        db.query(CatEstadoFlujoExpediente)
+        .filter(CatEstadoFlujoExpediente.codigo == "GESTION")
+        .first()
+    )
+
     for row in ws.iter_rows(min_row=2, values_only=True):
 
         dpi = str(row[10]).strip() if row[10] else None
@@ -357,6 +380,14 @@ def procesar_respuesta_banco_excel(
         else:
 
             item.estado = "RECHAZADO"
+
+            if estado_gestion:
+                db.query(ExpedienteElectronico).filter(
+                    ExpedienteElectronico.id == item.expediente_id
+                ).update({"estado_flujo_id": estado_gestion.id})
+            
+            
+
             rechazados += 1
 
     # =====================================================

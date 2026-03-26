@@ -51,6 +51,10 @@ class LotePagoPreviewResponse(BaseModel):
 # CREAR LOTE (NUEVO FLUJO)
 # =========================
 
+class UbicacionFiltro(BaseModel):
+    departamento_id: int
+    municipios: List[int] = []
+
 class LotePagoCrearPorFiltrosRequest(BaseModel):
     anio_fiscal: int
     mes_fiscal: int = Field(..., ge=1, le=12)
@@ -60,10 +64,10 @@ class LotePagoCrearPorFiltrosRequest(BaseModel):
 
     presupuesto_total: float = Field(..., ge=0)
 
-    filtros: Dict[str, Any]
+    numero_pago: int
+    ubicaciones: Optional[List[UbicacionFiltro]] = None
 
     observacion: Optional[str] = None
-
 
 # =========================
 # RESPUESTA CREAR LOTE
@@ -186,3 +190,7 @@ class PageLotePagoItemsResponse(BaseModel):
     page: int
     limit: int
     total: int
+
+class ExportBeneficiariosRequest(BaseModel):
+    numero_pago: int
+    ubicaciones: list | None = None
