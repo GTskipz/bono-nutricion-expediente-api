@@ -221,6 +221,26 @@ def read_sesan_xlsx_rows(file_path: str) -> list[dict]:
 # =====================================================
 # ✅ Valida el documento antes de correr por el 
 # =====================================================
+def norm_header(value: str) -> str:
+    if not value:
+        return ""
+
+    # Quitar espacios extremos
+    value = str(value).strip()
+
+    # Quitar acentos
+    value = unicodedata.normalize("NFD", value)
+    value = "".join(c for c in value if unicodedata.category(c) != "Mn")
+
+    # Mayúsculas
+    value = value.upper()
+
+    # Normalizar espacios internos
+    value = " ".join(value.split())
+
+    return value
+
+
 def validar_excel_sesan(file_path: str):
     try:
         wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
@@ -234,7 +254,7 @@ def validar_excel_sesan(file_path: str):
                 detail="No se encontraron encabezados válidos en el archivo Excel."
             )
 
-        # Validar columnas mínimas reales
+        # Leer encabezados
         headers = next(
             ws.iter_rows(
                 min_row=header_row,
@@ -243,8 +263,10 @@ def validar_excel_sesan(file_path: str):
             )
         )
 
+        # Normalizar headers del Excel
         headers_norm = {norm_header(h) for h in headers if h}
 
+        # Columnas requeridas (igual que antes)
         required = {
             "#",
             "AÑO",
@@ -273,7 +295,15 @@ def validar_excel_sesan(file_path: str):
             "VALIDACION",
         }
 
-        faltantes = [r for r in required if r not in headers_norm]
+        # 🔥 NORMALIZAR REQUIRED (este era el bug)
+        required_norm_map = {norm_header(r): r for r in required}
+
+        # Validar faltantes
+        faltantes = [
+            original
+            for norm, original in required_norm_map.items()
+            if norm not in headers_norm
+        ]
 
         if faltantes:
             raise HTTPException(
