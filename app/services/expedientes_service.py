@@ -14,7 +14,6 @@ from sqlalchemy import case, func, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-# ✅ NUEVOS MODELOS (Jonathan)
 from app.models.cat_area_salud import CatAreaSalud
 from app.models.cat_distrito_salud import CatDistritoSalud
 from app.models.cat_servicio_salud import CatServicioSalud
@@ -413,24 +412,43 @@ def buscar_expedientes(db: Session, payload: ExpedienteSearchRequest) -> Expedie
     )
 
 def buscar_persona_expedientes_service(db: Session, payload: PersonaExpedienteRequest):
-
     cui = payload.cui.strip()
 
     q = (
         db.query(
             ExpedienteElectronico.id.label("expediente_id"),
-
             InfoGeneral.anio.label("anio"),
 
             InfoGeneral.nombre_del_nino.label("nombre_beneficiario"),
             InfoGeneral.cui_del_nino.label("cui_beneficiario"),
 
+            # CAMBIO: devolver el nombre real de la persona encontrada
+            case(
+                (InfoGeneral.cui_del_nino == cui, InfoGeneral.nombre_del_nino),
+                (InfoGeneral.cui_de_la_madre == cui, InfoGeneral.nombre_de_la_madre),
+                (InfoGeneral.cui_del_padre == cui, InfoGeneral.nombre_del_padre),
+                (ExpedienteElectronico.titular_dpi == cui, ExpedienteElectronico.titular_nombre),
+                else_=None,
+            ).label("nombre_persona"),
+
+            # CAMBIO: devolver el CUI/DPI real de la persona encontrada
+            case(
+                (InfoGeneral.cui_del_nino == cui, InfoGeneral.cui_del_nino),
+                (InfoGeneral.cui_de_la_madre == cui, InfoGeneral.cui_de_la_madre),
+                (InfoGeneral.cui_del_padre == cui, InfoGeneral.cui_del_padre),
+                (ExpedienteElectronico.titular_dpi == cui, ExpedienteElectronico.titular_dpi),
+                else_=None,
+            ).label("cui_persona"),
+
             CatEstadoFlujoExpediente.nombre.label("estado_flujo_nombre"),
+
+            # CAMBIO: rol real encontrado
             case(
                 (InfoGeneral.cui_del_nino == cui, "BENEFICIARIO"),
                 (InfoGeneral.cui_de_la_madre == cui, "MADRE"),
                 (InfoGeneral.cui_del_padre == cui, "PADRE"),
-                else_="TITULAR",
+                (ExpedienteElectronico.titular_dpi == cui, "TITULAR"),
+                else_=None,
             ).label("rol"),
         )
         .join(
@@ -446,6 +464,7 @@ def buscar_persona_expedientes_service(db: Session, payload: PersonaExpedienteRe
                 InfoGeneral.cui_del_nino == cui,
                 InfoGeneral.cui_de_la_madre == cui,
                 InfoGeneral.cui_del_padre == cui,
+                ExpedienteElectronico.titular_dpi == cui,  # CAMBIO
             )
         )
         .order_by(ExpedienteElectronico.created_at.desc())
@@ -459,6 +478,11 @@ def buscar_persona_expedientes_service(db: Session, payload: PersonaExpedienteRe
             anio=r.anio,
             nombre_beneficiario=r.nombre_beneficiario,
             cui_beneficiario=r.cui_beneficiario,
+
+            # CAMBIO
+            nombre_persona=r.nombre_persona,
+            cui_persona=r.cui_persona,
+
             rol=r.rol,
             estado_flujo_nombre=r.estado_flujo_nombre,
         )
@@ -1083,4 +1107,35 @@ def obtener_cuenta_corriente_expediente(
         "total_movimientos": len(data),
         "anio": anio, 
         "data": data,
+    }
+
+def actualizar_telefono_encargado(
+    db: Session,
+    *,
+    expediente_id: int,
+    telefonos_encargados: str,
+):
+    # CAMBIO
+    info = (
+        db.query(InfoGeneral)
+        .filter(InfoGeneral.expediente_id == expediente_id)
+        .first()
+    )
+
+    if not info:
+        raise HTTPException(
+            status_code=404,
+            detail="No se encontró información general para el expediente.",
+        )
+
+    # CAMBIO
+    info.telefonos_encargados = telefonos_encargados.strip() if telefonos_encargados else None
+
+    db.commit()
+    db.refresh(info)
+
+    return {
+        "message": "Teléfono de encargado actualizado correctamente.",
+        "expediente_id": info.expediente_id,
+        "telefonos_encargados": info.telefonos_encargados,
     }

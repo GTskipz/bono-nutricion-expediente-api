@@ -8,7 +8,9 @@ from app.core.db import get_db
 
 from app.services.pagos_service import (
     bandeja_expedientes_con_cuenta,
+    eliminar_lote_pago,
     generar_excel_beneficiarios_pago,
+    generar_excel_beneficiarios_por_ids,
     generar_excel_lote_pago,
     generar_txt_detalle_lote,
     generar_txt_resumen_lote,
@@ -27,6 +29,7 @@ from app.services.pagos_service import (
 )
 
 from app.schemas.pagos import (
+    ExportBeneficiariosPorIdsRequest,
     ExportBeneficiariosRequest,
     LotePagoPreviewRequest,
     LotePagoCrearPorFiltrosRequest,
@@ -74,8 +77,8 @@ def crear_lote_por_filtros(
         monto_por_persona=payload.monto_por_persona,
         tope_anual_persona=payload.tope_anual_persona,
         presupuesto_total=payload.presupuesto_total,
-        numero_pago=payload.numero_pago,
-        ubicaciones=payload.ubicaciones,
+        filtros=payload.filtros,
+        beneficiario_ids_unicos=payload.beneficiario_ids_unicos,
         creado_por=None,
         observacion=payload.observacion,
     )
@@ -233,17 +236,42 @@ def descargar_excel_lote_pago(lote_id: int, db: Session = Depends(get_db)):
         },
     )
 
+@router.post("/beneficiarios/export/excel-por-ids")
+def exportar_beneficiarios_excel_por_ids(
+    payload: ExportBeneficiariosPorIdsRequest,
+    db: Session = Depends(get_db),
+):
+    stream = generar_excel_beneficiarios_por_ids(
+        db,
+        beneficiario_ids=payload.beneficiario_ids,
+    )
+
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": 'attachment; filename="beneficiarios_filtrados.xlsx"'
+        },
+    )
+
 # =====================================================
 # 📄 RESUMEN CSV
 # =====================================================
 @router.get("/lotes/{lote_id}/resumen-csv")
 def descargar_resumen_lote(
     lote_id: int,
+    formato: str = "csv",  # CAMBIO
     db: Session = Depends(get_db),
 ):
     response = generar_txt_resumen_lote(db, lote_id=lote_id)
-    response.media_type = "text/csv"
-    response.headers["Content-Disposition"] = f"attachment; filename=resumen_lote_{lote_id}.csv"
+
+    # CAMBIO
+    ext = "txt" if formato == "txt" else "csv"
+    media = "text/plain" if formato == "txt" else "text/csv"
+
+    response.media_type = media
+    response.headers["Content-Disposition"] = f"attachment; filename=resumen_lote_{lote_id}.{ext}"
+
     return response
 
 # =====================================================
@@ -252,6 +280,30 @@ def descargar_resumen_lote(
 @router.get("/lotes/{lote_id}/detalle-csv")
 def descargar_detalle_lote(
     lote_id: int,
+    formato: str = "csv",  # CAMBIO
     db: Session = Depends(get_db),
 ):
-    return generar_txt_detalle_lote(db, lote_id=lote_id)
+    response = generar_txt_detalle_lote(db, lote_id=lote_id)
+
+    # CAMBIO
+    ext = "txt" if formato == "txt" else "csv"
+    media = "text/plain" if formato == "txt" else "text/csv"
+
+    response.media_type = media
+    response.headers["Content-Disposition"] = f"attachment; filename=detalle_lote_{lote_id}.{ext}"
+
+    return response
+
+@router.put("/lotes/{lote_id}/eliminar")
+def eliminar_planilla(
+    lote_id: int,
+    db: Session = Depends(get_db),
+):
+
+    eliminado_por = "SISTEMA"
+
+    return eliminar_lote_pago(
+        db=db,
+        lote_id=lote_id,
+        eliminado_por=eliminado_por,
+    )

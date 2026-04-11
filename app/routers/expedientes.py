@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from app.core.db import get_db
 
 from app.schemas.expediente import (
+    ActualizarTelefonoEncargadoRequest,
     ExpedienteCreate,
     ExpedienteOut,
     ExpedienteSearchRequest,
@@ -31,6 +32,7 @@ from app.schemas.expediente import (
 from app.schemas.tracking_evento import TrackingCreate, TrackingOut
 
 from app.services.expedientes_service import (
+    actualizar_telefono_encargado,
     buscar_persona_expedientes_service,
     crear_expediente_core,
     obtener_cuenta_corriente_expediente,
@@ -375,4 +377,17 @@ def obtener_cuenta_corriente(
         db,
         expediente_id=expediente_id,
         anio=anio,
+    )
+
+@router.patch("/{expediente_id}/telefono-encargado")
+def actualizar_telefono_encargado_endpoint(
+    expediente_id: int,
+    payload: ActualizarTelefonoEncargadoRequest,
+    db: Session = Depends(get_db),
+):
+    # CAMBIO
+    return actualizar_telefono_encargado(
+        db,
+        expediente_id=expediente_id,
+        telefonos_encargados=payload.telefonos_encargados,
     )

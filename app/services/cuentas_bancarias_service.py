@@ -11,7 +11,7 @@ import string
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import func, or_, case
+from sqlalchemy import extract, func, or_, case
 
 from app.models.expediente_electronico import ExpedienteElectronico
 from app.models.cat_departamento import CatDepartamento
@@ -44,6 +44,22 @@ def bandeja_expedientes_por_estado_flujo(
 
     texto = (texto or "").strip()
     filters = [ExpedienteElectronico.estado_flujo_id == estado_flujo_id]
+
+    # CAMBIO: excluir expedientes ya vinculados a lotes de apertura en estado CREADO
+    subquery_existe_en_lote_creado = (
+        db.query(DetalleAperturaCuenta.id)
+        .join(
+            LoteAperturaCuenta,
+            LoteAperturaCuenta.id == DetalleAperturaCuenta.lote_id,
+        )
+        .filter(
+            DetalleAperturaCuenta.expediente_id == ExpedienteElectronico.id,
+            LoteAperturaCuenta.estado == "CREADO",
+        )
+        .exists()
+    )
+
+    filters.append(~subquery_existe_en_lote_creado)
 
     if texto:
         filters.append(
@@ -183,12 +199,37 @@ def listar_lotes_apertura(
 
     q = db.query(LoteAperturaCuenta)
 
+    # CAMBIO: si no mandan estado, ocultar eliminados por defecto
     if estado:
         q = q.filter(LoteAperturaCuenta.estado == estado)
+    else:
+        q = q.filter(LoteAperturaCuenta.estado != "ELIMINADO")
+
+    # CAMBIO: filtro por año usando creado_en
+    if anio:
+        q = q.filter(extract("year", LoteAperturaCuenta.creado_en) == anio)
+
+    # CAMBIO: filtro por texto
+    if texto:
+        q = q.filter(
+            or_(
+                func.cast(LoteAperturaCuenta.id, String).ilike(f"%{texto}%"),
+                LoteAperturaCuenta.estado.ilike(f"%{texto}%"),
+                LoteAperturaCuenta.creado_por.ilike(f"%{texto}%"),
+                LoteAperturaCuenta.banco_codigo.ilike(f"%{texto}%"),
+                LoteAperturaCuenta.observacion.ilike(f"%{texto}%"),
+                LoteAperturaCuenta.proveedor_servicio.ilike(f"%{texto}%"),
+            )
+        )
 
     total = q.with_entities(func.count(LoteAperturaCuenta.id)).scalar() or 0
 
-    lotes = q.offset(offset).limit(limit).all()
+    lotes = (
+        q.order_by(LoteAperturaCuenta.creado_en.desc())  # CAMBIO
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
 
     data = []
     for l in lotes:
@@ -580,3 +621,45 @@ def validar_excel_respuesta_banco(file_bytes: bytes):
         )
 
     return True
+
+def eliminar_lote_apertura_cuenta(
+    db: Session,
+    *,
+    lote_id: int,
+):
+    lote = (
+        db.query(LoteAperturaCuenta)
+        .filter(LoteAperturaCuenta.id == lote_id)
+        .first()
+    )
+
+    if not lote:
+        raise HTTPException(status_code=404, detail="Lote no encontrado")
+
+    # CAMBIO
+    if lote.estado == "PROCESADO":
+        raise HTTPException(
+            status_code=400,
+            detail="No se puede eliminar un lote que ya fue procesado"
+        )
+
+    # CAMBIO
+    if lote.estado == "ELIMINADO":
+        raise HTTPException(
+            status_code=400,
+            detail="El lote ya se encuentra eliminado"
+        )
+
+    # CAMBIO
+    lote.estado = "ELIMINADO"
+
+    db.add(lote)
+    db.commit()
+    db.refresh(lote)
+
+    return {
+        "ok": True,
+        "message": "Lote eliminado correctamente",
+        "id": lote.id,
+        "estado": lote.estado,
+    }

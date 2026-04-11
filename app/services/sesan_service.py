@@ -12,6 +12,7 @@ import json
 
 from app.core.db import SessionLocal
 from app.services.excel_reader import read_sesan_xlsx_rows
+from app.services.sesan_batch_proceso_service import SesanBatchProcesoService
 from app.services.sesan_batch_processor import SesanBatchProcessor
 from app.services.sesan_expediente_service import SesanExpedienteCreator
 from app.services.utils import (
@@ -666,11 +667,20 @@ class SesanService:
         batch_id: int,
         limit: int,
         usuario_id: str | None = None,
+        proceso_id: int | None = None,  # CAMBIO
     ):
 
         db = SessionLocal()
 
+        proceso_service = SesanBatchProcesoService(db)
+
         try:
+
+            # =========================
+            # marcar procesando
+            # =========================
+            if proceso_id:
+                proceso_service.marcar_procesando(proceso_id)
 
             service = SesanService(db)
 
@@ -678,7 +688,24 @@ class SesanService:
                 batch_id=batch_id,
                 limit=limit,
                 usuario_id=usuario_id,
+                proceso_id=proceso_id,
             )
+
+            # =========================
+            # finalizar OK
+            # =========================
+            if proceso_id:
+                proceso_service.finalizar_ok(proceso_id)
+
+        except Exception as e:
+
+            # =========================
+            # finalizar ERROR
+            # =========================
+            if proceso_id:
+                proceso_service.finalizar_error(proceso_id, str(e))
+
+            raise
 
         finally:
 
@@ -689,12 +716,20 @@ class SesanService:
         *,
         batch_id: int,
         limit: int,
-        usuario_id: str | None = None
+        usuario_id: str | None = None,
+        proceso_id: int | None = None 
     ):
 
         processor = SesanBatchProcessor(self.bpm)
+        proceso_service = SesanBatchProcesoService(self.db)
 
         while True:
+
+            # =========================
+            # heartbeat antes
+            # =========================
+            if proceso_id:
+                proceso_service.heartbeat(proceso_id)
 
             rows = self.db.execute(
                 text("""
@@ -717,6 +752,12 @@ class SesanService:
                 row_ids=ids,
                 usuario_id=usuario_id
             )
+
+            # =========================
+            # heartbeat después
+            # =========================
+            if proceso_id:
+                proceso_service.heartbeat(proceso_id)
 
     # =====================================================
     # 5) Procesar fila individual
@@ -1098,7 +1139,14 @@ class SesanService:
 
         return dict(row)
     
-    def reprocesar_batch_esperando_callback(self, batch_id: int):
+    def reprocesar_batch_esperando_callback(
+        self,
+        batch_id: int,
+        proceso_id: int | None = None,  # CAMBIO
+    ):
+
+        # CAMBIO
+        proceso_service = SesanBatchProcesoService(self.db)
 
         rows = self.db.execute(
             text("""
@@ -1115,6 +1163,10 @@ class SesanService:
         ids = [row["bpm_instance_id"] for row in rows]
 
         for bpm_instance_id in ids:
+
+            # CAMBIO
+            if proceso_id:
+                proceso_service.heartbeat(proceso_id)
 
             try:
 

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import String, func, or_, case, text
 
 from openpyxl import Workbook
+from openpyxl.styles import Font as XLFont
 from io import BytesIO
 
 from app.models.expediente_electronico import ExpedienteElectronico
@@ -516,6 +517,8 @@ def listar_lotes_pago(
 
     q = db.query(LotePago)
 
+    q = q.filter(LotePago.estado != "ELIMINADO")
+
     if anio:
         q = q.filter(LotePago.anio_fiscal == anio)
     if mes:
@@ -817,6 +820,106 @@ def generar_excel_lote_pago(db: Session, *, lote_id: int) -> BytesIO:
 
     return stream
 
+def generar_excel_beneficiarios_por_ids(
+    db: Session,
+    *,
+    beneficiario_ids: list[int],
+) -> BytesIO:
+
+    # =========================
+    # VALIDACIONES
+    # =========================
+    if not beneficiario_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="Debe enviar beneficiario_ids"
+        )
+
+    beneficiario_ids = list({int(x) for x in beneficiario_ids if x is not None})
+
+    if not beneficiario_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="No hay beneficiarios válidos para exportar"
+        )
+
+    # =========================
+    # CONSULTA
+    # =========================
+    rows = db.execute(
+        text("""
+            SELECT
+                e.id AS expediente_id,
+                e.cui_beneficiario,
+                e.nombre_beneficiario,
+                e.titular_nombre,
+                e.titular_dpi,
+                cb.numero_cuenta,
+                d.nombre AS departamento,
+                m.nombre AS municipio,
+                e.created_at
+            FROM expediente_electronico e
+            JOIN cuenta_bancaria_expediente cb
+                ON cb.expediente_id = e.id
+            LEFT JOIN cat_departamento d
+                ON d.id = e.departamento_id
+            LEFT JOIN cat_municipio m
+                ON m.id = e.municipio_id
+            WHERE e.id = ANY(:ids)
+            ORDER BY e.created_at DESC
+        """),
+        {"ids": beneficiario_ids}
+    ).fetchall()
+
+    if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail="No se encontraron beneficiarios"
+        )
+
+    # =========================
+    # EXCEL
+    # =========================
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Beneficiarios"
+
+    headers = [
+        "EXPEDIENTE",
+        "CUI",
+        "NOMBRE",
+        "TITULAR",
+        "DPI TITULAR",
+        "CUENTA",
+        "DEPARTAMENTO",
+        "MUNICIPIO",
+        "FECHA CREACIÓN",
+    ]
+
+    ws.append(headers)
+
+    for col in ws[1]:
+        col.font = XLFont(bold=True)
+
+    for r in rows:
+        ws.append([
+            r.expediente_id,
+            r.cui_beneficiario,
+            r.nombre_beneficiario,
+            r.titular_nombre,
+            r.titular_dpi,
+            r.numero_cuenta,
+            r.departamento,
+            r.municipio,
+            r.created_at.strftime("%d/%m/%Y %H:%M") if r.created_at else None,
+        ])
+
+    stream = BytesIO()
+    wb.save(stream)
+    stream.seek(0)
+
+    return stream
+
 # -------------------------------------------------
 # PROCESAR LOTE (SIMULADO) + VALIDACIÓN TOPE ANUAL
 # -------------------------------------------------
@@ -1081,22 +1184,29 @@ def crear_lote_pago_por_filtros(
     monto_por_persona: float,
     tope_anual_persona: float,
     presupuesto_total: float,
-    numero_pago: int,
-    ubicaciones: list | None,
+
+    # CAMBIO 🔥
+    filtros: list,
+    beneficiario_ids_unicos: list[int],
+
     creado_por: Optional[str] = None,
     observacion: Optional[str] = None,
 ) -> Tuple[int, int]:
 
-    if numero_pago != 0 and not ubicaciones:
-        raise HTTPException(
-            status_code=400,
-            detail="Debe enviar ubicaciones para este número de pago"
-        )
+    # =========================
+    # VALIDACIONES
+    # =========================
 
     if monto_por_persona <= 0:
         raise HTTPException(
             status_code=400,
             detail="monto_por_persona debe ser mayor a 0"
+        )
+
+    if not beneficiario_ids_unicos:
+        raise HTTPException(
+            status_code=400,
+            detail="Debe enviar beneficiarios"
         )
 
     max_beneficiarios = int(presupuesto_total // monto_por_persona)
@@ -1107,47 +1217,49 @@ def crear_lote_pago_por_filtros(
             detail="El presupuesto no alcanza para ningún beneficiario"
         )
 
-    # =====================================================
-    # 🔥 OBTENER TODOS (SIN LIMIT)
-    # =====================================================
-    rows = obtener_beneficiarios_para_pago(
-        db,
-        numero_pago=numero_pago,
-        ubicaciones=ubicaciones,
-        limite=None
-    )
+    total_actual = len(beneficiario_ids_unicos)
 
-    total_actual = len(rows)
-
-    if total_actual == 0:
-        raise HTTPException(
-            status_code=404,
-            detail="No se encontraron beneficiarios"
-        )
-
-    # =====================================================
-    # 🔥 VALIDACIÓN DE CONSISTENCIA (CLAVE)
-    # =====================================================
+    # =========================
+    # VALIDACIÓN PRESUPUESTO
+    # =========================
     if total_actual > max_beneficiarios:
         raise HTTPException(
             status_code=409,
             detail=(
                 f"El presupuesto permite {max_beneficiarios} beneficiarios, "
-                f"pero actualmente hay {total_actual}. "
-                "La información ha cambiado desde la consulta. "
-                "Por favor, vuelva a calcular antes de continuar."
+                f"pero se enviaron {total_actual}. "
+                "Por favor, revise los filtros antes de continuar."
             )
         )
 
-    # =====================================================
-    # 🔥 RECORTE (YA SEGURO)
-    # =====================================================
-    rows = rows[:max_beneficiarios]
+    # =========================
+    # 🔥 OBTENER DATOS REALES (SOLO IDs)
+    # =========================
+    rows = db.execute(
+        text("""
+            SELECT
+                e.id,
+                e.nombre_beneficiario,
+                e.cui_beneficiario,
+                cb.numero_cuenta,
+                cb.banco_codigo
+            FROM expediente_electronico e
+            JOIN cuenta_bancaria_expediente cb
+                ON cb.expediente_id = e.id
+            WHERE e.id = ANY(:ids)
+        """),
+        {"ids": beneficiario_ids_unicos}
+    ).fetchall()
 
-    # -------------------------------------------------
+    if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail="No se encontraron beneficiarios"
+        )
+
+    # =========================
     # CREAR LOTE
-    # -------------------------------------------------
-
+    # =========================
     lote = LotePago(
         anio_fiscal=anio_fiscal,
         mes_fiscal=mes_fiscal,
@@ -1155,12 +1267,14 @@ def crear_lote_pago_por_filtros(
         tope_anual_persona=tope_anual_persona,
         presupuesto_total=presupuesto_total,
 
+        # CAMBIO 🔥
         monto_usado=len(rows) * monto_por_persona,
-        beneficiarios_encontrados=total_actual,
+        beneficiarios_encontrados=len(rows),
 
+        # CAMBIO 🔥 (guardamos TODO)
         filtros_json={
-            "numero_pago": numero_pago,
-            "ubicaciones": ubicaciones
+            "filtros": filtros,
+            "beneficiario_ids_unicos": beneficiario_ids_unicos,
         },
 
         banco_codigo="BANRURAL",
@@ -1172,31 +1286,29 @@ def crear_lote_pago_por_filtros(
     db.add(lote)
     db.flush()
 
-    # -------------------------------------------------
+    # =========================
     # CREAR ITEMS
-    # -------------------------------------------------
-
+    # =========================
     for r in rows:
 
         db.add(
             DetallePago(
                 lote_id=lote.id,
-                expediente_id=r["id"],
+                expediente_id=r.id,
                 anio_fiscal=anio_fiscal,
                 mes_fiscal=mes_fiscal,
                 estado="PENDIENTE",
                 monto_asignado=monto_por_persona,
-                cui_beneficiario=r["cui_beneficiario"],
-                nombre_beneficiario=r["nombre_beneficiario"],
-                banco_codigo=r["banco_codigo"] or "BANRURAL",
-                numero_cuenta=r["numero_cuenta"],
+                cui_beneficiario=r.cui_beneficiario,
+                nombre_beneficiario=r.nombre_beneficiario,
+                banco_codigo=r.banco_codigo or "BANRURAL",
+                numero_cuenta=r.numero_cuenta,
             )
         )
 
-        # TRACKING
         TrackingEventoService._registrar(
             db,
-            expediente_id=int(r["id"]),
+            expediente_id=int(r.id),
             titulo="Intento de pago",
             origen=TrackingEventoService.ORIGEN_PAGOS,
             tipo_evento=TrackingEventoService.PAGO_INTENTO,
@@ -1373,30 +1485,24 @@ def obtener_totales_beneficiarios_pago(
         db,
         numero_pago=numero_pago,
         ubicaciones=ubicaciones,
-        limite=None  # 🔥 mismo comportamiento que excel
+        limite=None
     )
 
     if not rows:
         return {
             "beneficiarios_encontrados": 0,
             "beneficiarios_posibles": 0,
-            "monto_estimado": 0,
+            "beneficiario_ids": [],  # CAMBIO
         }
 
-    # ------------------------------
-    # CÁLCULOS
-    # ------------------------------
     total = len(rows)
 
-    # ⚠️ luego esto vendrá del frontend
-    monto_por_persona = 500
-
-    monto_estimado = total * monto_por_persona
+    beneficiario_ids = list({row["id"] for row in rows if row.get("id") is not None})  # CAMBIO
 
     return {
         "beneficiarios_encontrados": total,
         "beneficiarios_posibles": total,
-        "monto_estimado": monto_estimado,
+        "beneficiario_ids": beneficiario_ids,  # CAMBIO
     }
 
 def generar_excel_beneficiarios_pago(
@@ -1572,3 +1678,64 @@ def generar_txt_detalle_lote(db: Session, *, lote_id: int):
             "Content-Disposition": f"attachment; filename=detalle_lote_{lote_id}.csv"
         }
     )
+
+def eliminar_lote_pago(
+    db: Session,
+    lote_id: int,
+    eliminado_por: str | None = None,
+):
+    lote = db.execute(
+        text("""
+            SELECT id, estado, observacion
+            FROM lote_pago
+            WHERE id = :lote_id
+        """),
+        {"lote_id": lote_id}
+    ).mappings().first()
+
+    if not lote:
+        raise HTTPException(
+            status_code=404,
+            detail="La planilla no existe"
+        )
+
+    if lote["estado"] == "ELIMINADO":
+        raise HTTPException(
+            status_code=400,
+            detail="La planilla ya fue eliminada"
+        )
+
+    observacion_actual = lote["observacion"] or ""
+
+    texto_eliminacion = "Planilla marcada como ELIMINADO"
+    if eliminado_por:
+        texto_eliminacion += f" por {eliminado_por}"
+
+    nueva_observacion = (
+        f"{observacion_actual} | {texto_eliminacion}"
+        if observacion_actual.strip()
+        else texto_eliminacion
+    )
+
+    db.execute(
+        text("""
+            UPDATE lote_pago
+            SET
+                estado = 'ELIMINADO',
+                observacion = :observacion
+            WHERE id = :lote_id
+        """),
+        {
+            "lote_id": lote_id,
+            "observacion": nueva_observacion,
+        }
+    )
+
+    db.commit()
+
+    return {
+        "ok": True,
+        "message": "Planilla eliminada correctamente",
+        "id": lote_id,
+        "estado": "ELIMINADO",
+    }

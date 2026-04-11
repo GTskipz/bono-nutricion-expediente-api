@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import AuthContext, require_auth_context
 from app.core.db import SessionLocal, get_db
+from app.services.sesan_batch_proceso_service import SesanBatchProcesoService
 from app.services.sesan_service import SesanService
 
 router = APIRouter(prefix="/sesan", tags=["SESAN"])
@@ -83,23 +84,33 @@ def listar_filas_batch(
 async def procesar_pendientes_batch(
     batch_id: int,
     background_tasks: BackgroundTasks,
-    limit: int = Query(200, ge=1, le=2000),
+    limit: int = Query(50, ge=1, le=100),
     auth: AuthContext = Depends(require_auth_context),
+    db: Session = Depends(get_db),  # CAMBIO
 ):
 
     usuario_id = auth.user.get("id")
+
+    # CAMBIO: crear proceso antes del hilo
+    proceso_service = SesanBatchProcesoService(db)
+    proceso_id = proceso_service.crear_proceso(
+        batch_id=batch_id,
+        usuario_id=usuario_id,
+    )
 
     background_tasks.add_task(
         SesanService.procesar_pendientes_batch_background,
         batch_id,
         limit,
         usuario_id,
+        proceso_id,  # CAMBIO
     )
 
     return {
         "mensaje": "Procesamiento iniciado",
         "batch_id": batch_id,
         "limit": limit,
+        "proceso_id": proceso_id,  # CAMBIO
     }
 
 
@@ -128,14 +139,12 @@ def reintentar_errores_batch(
 ):
     return SesanService(db).reintentar_errores_batch(batch_id=batch_id, limit=limit)
 
-
 @router.post("/row/{row_id}/reintentar")
 def reintentar_row(
     row_id: int,
     db: Session = Depends(get_db),
 ):
     return SesanService(db).reintentar_row(row_id=row_id)
-
 
 @router.post("/row/{row_id}/ignorar")
 def ignorar_row(
@@ -157,6 +166,10 @@ def ignorar_row(
 @router.get("/batch/{batch_id}")
 def obtener_detalle_batch(batch_id: int, db: Session = Depends(get_db)):
     return SesanService(db).obtener_detalle_batch(batch_id)
+
+@router.get("/batch/{batch_id}/proceso")
+def obtener_estado_proceso(batch_id: int, db: Session = Depends(get_db)):
+    return SesanBatchProcesoService(db).obtener_proceso_batch(batch_id)
 
 @router.delete("/lotes/{lote_id}")
 def eliminar_lote(lote_id: int, db: SesanService = Depends(get_db)):
@@ -183,24 +196,63 @@ def obtener_totales_batch(
 
 
 @router.post("/batch/{batch_id}/reprocesar-esperando-callback")
-def reprocesar_batch(batch_id: int, background_tasks: BackgroundTasks):
+def reprocesar_batch(
+    batch_id: int,
+    background_tasks: BackgroundTasks,
+    auth: AuthContext = Depends(require_auth_context),  
+    db: Session = Depends(get_db),  
+):
+
+    usuario_id = auth.user.get("id") 
+
+    proceso_service = SesanBatchProcesoService(db)
+    proceso_id = proceso_service.crear_proceso(
+        batch_id=batch_id,
+        usuario_id=usuario_id,
+    )
 
     background_tasks.add_task(
         reprocesar_batch_wrapper,
-        batch_id
+        batch_id,
+        proceso_id, 
     )
 
     return {
         "mensaje": "Reproceso iniciado",
-        "batch_id": batch_id
+        "batch_id": batch_id,
+        "proceso_id": proceso_id, 
     }
 
-def reprocesar_batch_wrapper(batch_id: int):
+def reprocesar_batch_wrapper(
+    batch_id: int,
+    proceso_id: int,  
+):
 
     db = SessionLocal()
+    proceso_service = SesanBatchProcesoService(db)  
 
     try:
-        SesanService(db).reprocesar_batch_esperando_callback(batch_id)
+        # =========================
+        # marcar procesando
+        # =========================
+        proceso_service.marcar_procesando(proceso_id)  
+
+        SesanService(db).reprocesar_batch_esperando_callback(
+            batch_id=batch_id,
+            proceso_id=proceso_id,  
+        )
+
+        # =========================
+        # finalizar OK
+        # =========================
+        proceso_service.finalizar_ok(proceso_id)  
+
+    except Exception as e:
+        # =========================
+        # finalizar ERROR
+        # =========================
+        proceso_service.finalizar_error(proceso_id, str(e))  
+        raise
 
     finally:
         db.close()

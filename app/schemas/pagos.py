@@ -58,16 +58,16 @@ class UbicacionFiltro(BaseModel):
 class LotePagoCrearPorFiltrosRequest(BaseModel):
     anio_fiscal: int
     mes_fiscal: int = Field(..., ge=1, le=12)
-
     monto_por_persona: float = Field(..., ge=0)
     tope_anual_persona: float = Field(..., ge=0)
-
     presupuesto_total: float = Field(..., ge=0)
-
-    numero_pago: int
-    ubicaciones: Optional[List[UbicacionFiltro]] = None
+    filtros: List[Dict[str, Any]]
+    beneficiario_ids_unicos: List[int]
 
     observacion: Optional[str] = None
+
+class ExportBeneficiariosPorIdsRequest(BaseModel):
+    beneficiario_ids: List[int]
 
 # =========================
 # RESPUESTA CREAR LOTE

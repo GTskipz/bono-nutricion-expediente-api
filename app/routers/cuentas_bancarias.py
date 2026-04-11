@@ -10,6 +10,7 @@ from app.services.banco_archivo_service import descargar_archivo_operacion
 from app.services.cuentas_bancarias_service import (
     bandeja_expedientes_por_estado_flujo,
     crear_lote_apertura,
+    eliminar_lote_apertura_cuenta,
     listar_lotes_apertura,
     obtener_lote_apertura,
     listar_items_lote,
@@ -186,4 +187,14 @@ def descargar_respuesta_banco(
         headers={
             "Content-Disposition": f'attachment; filename="{result["filename"]}"'
         },
+    )
+
+@router.delete("/lotes/{lote_id}")
+def eliminar_lote(
+    lote_id: int,
+    db: Session = Depends(get_db),
+):
+    return eliminar_lote_apertura_cuenta(
+        db,
+        lote_id=lote_id,
     )

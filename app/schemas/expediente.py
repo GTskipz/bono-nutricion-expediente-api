@@ -189,11 +189,16 @@ class ExpedienteTitularIn(BaseModel):
 
 class PersonaExpedienteItem(BaseModel):
     expediente_id: int
-    anio: str | None
-    nombre_beneficiario: str | None
-    cui_beneficiario: str | None
+    anio: str | None = None
+    nombre_beneficiario: str | None = None
+    cui_beneficiario: str | None = None
+
+    # CAMBIO
+    nombre_persona: str | None = None
+    cui_persona: str | None = None
+
     rol: str
-    estado_flujo_nombre: str | None
+    estado_flujo_nombre: str | None = None
 
 
 class PersonaExpedienteResponse(BaseModel):
@@ -204,3 +209,6 @@ class PersonaExpedienteResponse(BaseModel):
 
 class PersonaExpedienteRequest(BaseModel):
     cui: str
+
+class ActualizarTelefonoEncargadoRequest(BaseModel):
+    telefonos_encargados: str | None = None
