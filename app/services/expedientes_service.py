@@ -851,6 +851,7 @@ def actualizar_titular_y_estado_flujo(
     titular_nombre: str | None,
     titular_dpi: str | None,
     personalizado: bool = False,
+    usuario_nombre: str | None = None, # SE AGREGA PARÁMETRO PARA AUDITORÍA
 ):
     estado_codigo = (
         "TITULAR_PERSONALIZADO_PENDIENTE"
@@ -918,7 +919,7 @@ def actualizar_titular_y_estado_flujo(
         titulo="Titular cargado" if not personalizado else "Titular personalizado pendiente",
         origen=TrackingEventoService.ORIGEN_EXPEDIENTE,
         tipo_evento="TITULAR_CARGADO" if not personalizado else "TITULAR_PERSONALIZADO_PENDIENTE",
-        usuario=None,
+        usuario=usuario_nombre, # SE CAMBIA None POR EL USUARIO REAL
         observacion=(f"{titular_nombre or ''} | {titular_dpi or ''}" if not personalizado else None),
         commit=False,
     )
@@ -934,7 +935,7 @@ def actualizar_titular_y_estado_flujo(
         "estado_flujo_nombre": estado["nombre"],
     }
 
-def confirmar_documentos_cargados(db: Session, expediente_id: int):
+def confirmar_documentos_cargados(db: Session, expediente_id: int, usuario_nombre: str | None = None):
     estado = db.execute(
         text("""
             SELECT id, codigo, nombre
@@ -969,7 +970,7 @@ def confirmar_documentos_cargados(db: Session, expediente_id: int):
         titulo="Documentos cargados confirmados",
         origen=TrackingEventoService.ORIGEN_DOCUMENTOS,
         tipo_evento="DOCS_CARGADOS_CONFIRMADOS",
-        usuario=None,
+        usuario=usuario_nombre,
         observacion=None,
         commit=False,
     )
@@ -983,7 +984,7 @@ def confirmar_documentos_cargados(db: Session, expediente_id: int):
         "estado_flujo_nombre": estado["nombre"],
     }
 
-def pasar_a_docs_verificados(db: Session, expediente_id: int):
+def pasar_a_docs_verificados(db: Session, expediente_id: int, usuario_nombre: str | None = None):
     row = db.execute(
         text("""
             UPDATE expediente_electronico
@@ -1010,7 +1011,7 @@ def pasar_a_docs_verificados(db: Session, expediente_id: int):
         titulo="Documentos verificados",
         origen=TrackingEventoService.ORIGEN_DOCUMENTOS,
         tipo_evento="DOCS_VERIFICADOS",
-        usuario=None,
+        usuario=usuario_nombre,
         observacion=None,
         commit=False,
     )
@@ -1019,7 +1020,7 @@ def pasar_a_docs_verificados(db: Session, expediente_id: int):
     return dict(row)
 
 # ✅ CAMBIO REALIZADO (Jonathan): Marcar expediente en gestión
-def pasar_a_gestion(db: Session, expediente_id: int):
+def pasar_a_gestion(db: Session, expediente_id: int, usuario_nombre: str | None = None):
     row = db.execute(
         text("""
             UPDATE expediente_electronico
@@ -1046,7 +1047,7 @@ def pasar_a_gestion(db: Session, expediente_id: int):
         titulo="Expediente en gestión",
         origen=TrackingEventoService.ORIGEN_EXPEDIENTE,
         tipo_evento="EXPEDIENTE_EN_GESTION",
-        usuario=None,
+        usuario=usuario_nombre,
         observacion="El expediente fue movido a gestión para revisión o corrección.",
         commit=False,
     )

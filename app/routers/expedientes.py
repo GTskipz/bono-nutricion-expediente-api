@@ -260,7 +260,19 @@ async def registrar_titular(
     expediente_id: int,
     payload: ExpedienteTitularIn,
     db: Session = Depends(get_db),
+    auth: AuthContext = Depends(require_auth_context),
 ):
+
+    # AJUSTE: Se toma el 'username' directamente de la raíz del objeto auth.user
+    usuario_nombre = None
+    if auth and auth.user:
+        usuario_nombre = auth.user.get("username")
+
+    # --- PRUEBA DE DEBUG (CORREGIDA) ---
+    print(f"DEBUG: Contenido del token: {auth.user}") 
+    print(f"DEBUG: Username extraído: {usuario_nombre}")
+    # -----------------------------------
+
     try:
         row = actualizar_titular_y_estado_flujo(
             db,
@@ -268,6 +280,7 @@ async def registrar_titular(
             titular_nombre=payload.titular_nombre,
             titular_dpi=payload.titular_dpi,
             personalizado=payload.personalizado,
+            usuario_nombre=usuario_nombre,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -291,10 +304,13 @@ async def registrar_titular(
     return row
 
 @router.post("/{expediente_id}/documentos/confirmar")
-async def confirmar_docs(expediente_id: int, db: Session = Depends(get_db)):
+async def confirmar_docs(expediente_id: int, db: Session = Depends(get_db), auth: AuthContext = Depends(require_auth_context)):
+    # Extraemos el usuario para que el evento de confirmación no salga null
+    usuario_nombre = auth.user.get("username") if auth else None
     # 1) BD (ya hace commit adentro)
     try:
-        row = confirmar_documentos_cargados(db, expediente_id)
+        # CAMBIO: Se pasa usuario_nombre como tercer parámetro
+        row = confirmar_documentos_cargados(db, expediente_id, usuario_nombre)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -319,15 +335,23 @@ async def confirmar_docs(expediente_id: int, db: Session = Depends(get_db)):
     return row
 
 @router.post("/{expediente_id}/documentos/verificar")
-def verificar_docs(expediente_id: int, db: Session = Depends(get_db)):
-    row = pasar_a_docs_verificados(db, expediente_id)
+def verificar_docs(expediente_id: int, db: Session = Depends(get_db), auth: AuthContext = Depends(require_auth_context)):
+    # Extraemos el usuario para el tracking
+    usuario_nombre = auth.user.get("username") if auth else None
+    
+    # CAMBIO: Se pasa usuario_nombre al service
+    row = pasar_a_docs_verificados(db, expediente_id, usuario_nombre)
     if not row:
         raise HTTPException(status_code=404, detail="Expediente no encontrado")
     return row
 
 @router.post("/{expediente_id}/gestion")
-def marcar_en_gestion(expediente_id: int, db: Session = Depends(get_db)):
-    row = pasar_a_gestion(db, expediente_id)
+def marcar_en_gestion(expediente_id: int, db: Session = Depends(get_db), auth: AuthContext = Depends(require_auth_context)):
+    # Extraemos el usuario para el tracking
+    usuario_nombre = auth.user.get("username") if auth else None
+
+    # CAMBIO: Se pasa usuario_nombre al service
+    row = pasar_a_gestion(db, expediente_id, usuario_nombre)
     if not row:
         raise HTTPException(status_code=404, detail="Expediente no encontrado")
     return row

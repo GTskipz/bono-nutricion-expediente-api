@@ -11,7 +11,7 @@ import string
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import extract, func, or_, case
+from sqlalchemy import extract, func, or_, case, String # Agregado String para el cast en búsqueda
 
 from app.models.expediente_electronico import ExpedienteElectronico
 from app.models.cat_departamento import CatDepartamento
@@ -321,6 +321,7 @@ def procesar_respuesta_banco_excel(
     lote_id: int,
     file_bytes: bytes,
     filename: str,
+    usuario_nombre: Optional[str] = None, # 🟢 SE AGREGA PARÁMETRO DE AUDITORÍA
 ):
 
     lote = (
@@ -349,6 +350,10 @@ def procesar_respuesta_banco_excel(
 
     # guardar relación lote -> archivo
     lote.archivo_respuesta_id = archivo["id"]
+
+    # ✅ SE PODRÍA ACTUALIZAR QUIÉN PROCESÓ EL ARCHIVO
+    if usuario_nombre:
+        lote.observacion = (lote.observacion or "") + f" | Procesado por: {usuario_nombre}"
 
     # =====================================================
     # Procesar Excel
@@ -626,6 +631,7 @@ def eliminar_lote_apertura_cuenta(
     db: Session,
     *,
     lote_id: int,
+    usuario_nombre: Optional[str] = None, # 🟢 SE AGREGA PARÁMETRO DE AUDITORÍA
 ):
     lote = (
         db.query(LoteAperturaCuenta)
@@ -652,6 +658,10 @@ def eliminar_lote_apertura_cuenta(
 
     # CAMBIO
     lote.estado = "ELIMINADO"
+
+    # ✅ Auditoría: Dejamos rastro de quién realizó la eliminación
+    if usuario_nombre:
+        lote.creado_por = f"{lote.creado_por} (Eliminado por: {usuario_nombre})"
 
     db.add(lote)
     db.commit()

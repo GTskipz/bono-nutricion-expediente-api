@@ -5,6 +5,8 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
+# ✅ IMPORTACIÓN NECESARIA PARA EL TOKEN
+from app.core.auth import require_auth_context, AuthContext 
 
 from app.services.banco_archivo_service import descargar_archivo_operacion
 from app.services.cuentas_bancarias_service import (
@@ -57,12 +59,18 @@ def bandeja(
 # CREAR LOTE
 # ==========================================================
 @router.post("/lotes", response_model=LoteCrearResponse)
-def crear_lote(payload: LoteCrearRequest, db: Session = Depends(get_db)):
+def crear_lote(
+    payload: LoteCrearRequest, 
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(require_auth_context), # 🟢 SE AGREGA EL CONTEXTO DE AUTH
+):
+    # ✅ SE OBTIENE EL NOMBRE DEL USUARIO DESDE EL TOKEN
+    usuario_nombre = auth.user.get("username") if auth else None
 
     lote_id, total = crear_lote_apertura(
         db,
         expediente_ids=payload.expediente_ids,
-        creado_por=None,
+        creado_por=usuario_nombre, # 🟢 SE CAMBIA None POR LA VARIABLE usuario_nombre
         observacion=payload.observacion,
         proveedor_servicio=payload.proveedor_servicio,
     )
@@ -154,7 +162,10 @@ async def subir_respuesta_banco(
     lote_id: int,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
+    auth: AuthContext = Depends(require_auth_context), # 🟢 SE INYECTA AUTH PARA AUDITORÍA
 ):
+    # ✅ SE OBTIENE EL USUARIO
+    usuario_nombre = auth.user.get("username") if auth else None
 
     file_bytes = await file.read()
 
@@ -167,6 +178,7 @@ async def subir_respuesta_banco(
         lote_id=lote_id,
         file_bytes=file_bytes,
         filename=file.filename,  # 👈 necesario para guardar en MinIO
+        usuario_nombre=usuario_nombre, # 🟢 SE PASA AL SERVICE
     )
 
 @router.get("/lotes/{lote_id}/archivo-respuesta")
@@ -193,8 +205,13 @@ def descargar_respuesta_banco(
 def eliminar_lote(
     lote_id: int,
     db: Session = Depends(get_db),
+    auth: AuthContext = Depends(require_auth_context), # 🟢 SE INYECTA AUTH PARA AUDITORÍA
 ):
+    # ✅ SE OBTIENE EL USUARIO
+    usuario_nombre = auth.user.get("username") if auth else None
+
     return eliminar_lote_apertura_cuenta(
         db,
         lote_id=lote_id,
+        usuario_nombre=usuario_nombre, # 🟢 SE PASA AL SERVICE
     )
