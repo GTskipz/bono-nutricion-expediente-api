@@ -28,39 +28,32 @@ class BpmServiceTaskTitular:
         dpi_titular: str,
         tiene_copia_recibo: bool,
         tiene_copia_dpi: bool,
+        usuario_nombre: str | None = None,  # CAMBIO
     ) -> Dict[str, Any]:
 
         try:
             # ============================================
-            # 1️⃣ Actualizar BD (SIN COMMIT)
-            # ============================================
-            r = actualizar_titular_y_estado_flujo(
-                db=self.db,
-                expediente_id=expediente_id,
-                titular_nombre=nombre_titular,
-                titular_dpi=dpi_titular,
-                personalizado=False,
-            )
-
-            # ============================================
-            # 2️⃣ Obtener bpm_instance_id
+            # 1️⃣ Validar expediente y obtener bpm_instance_id
             # ============================================
             row = self.db.execute(
                 text("""
-                    SELECT bpm_instance_id
+                    SELECT id, bpm_instance_id
                     FROM expediente_electronico
                     WHERE id = :id
                 """),
                 {"id": expediente_id},
             ).mappings().first()
 
-            if not row or not row.get("bpm_instance_id"):
+            if not row:
+                raise ValueError("Expediente no encontrado")
+
+            if not row.get("bpm_instance_id"):
                 raise ValueError("Expediente no tiene bpm_instance_id")
 
             process_instance_id = int(row["bpm_instance_id"])
 
             # ============================================
-            # 3️⃣ Obtener task activo
+            # 2️⃣ Obtener task activo
             # ============================================
             instruction = await self.bpm.get_task_instruction(process_instance_id)
 
@@ -71,7 +64,7 @@ class BpmServiceTaskTitular:
                 raise RuntimeError("No se encontró task activo en BPM")
 
             # ============================================
-            # 4️⃣ Enviar titular a BPM
+            # 3️⃣ Enviar titular a BPM
             # ============================================
             payload = {
                 "seccion_titular": {
@@ -106,18 +99,32 @@ class BpmServiceTaskTitular:
             bpm_response = response.json()
 
             # ============================================
-            # 5️⃣ Commit final (TODO OK)
+            # 4️⃣ Solo si BPM salió bien, actualizar BD
+            # ============================================
+            expediente = actualizar_titular_y_estado_flujo(
+                db=self.db,
+                expediente_id=expediente_id,
+                titular_nombre=nombre_titular,
+                titular_dpi=dpi_titular,
+                personalizado=False,
+                usuario_nombre=usuario_nombre,  # CAMBIO
+            )
+
+            if not expediente:
+                raise ValueError("Expediente no encontrado al actualizar titular")
+
+            # ============================================
+            # 5️⃣ Commit final
             # ============================================
             self.db.commit()
 
             return {
                 "ok": True,
-                "expediente": r,
+                "expediente": expediente,
                 "bpm": bpm_response,
             }
 
         except Exception as e:
-            # 🔥 ROLLBACK TOTAL
             try:
                 self.db.rollback()
             except Exception:
@@ -126,5 +133,5 @@ class BpmServiceTaskTitular:
             logger.error("Error procesando titular BPM: %s", str(e))
 
             raise RuntimeError(
-                f"No se pudo completar la operación. Se revirtió la transacción. Detalle: {str(e)}"
+                f"No se pudo completar la operación. No se actualizó el expediente. Detalle: {str(e)}"
             )

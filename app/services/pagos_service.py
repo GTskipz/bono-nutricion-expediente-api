@@ -722,12 +722,39 @@ def resolver_filtros(db: Session, filtros_json: dict | None) -> dict | None:
 # LISTAR ITEMS DE LOTE
 # -------------------------------------------------
 def listar_items_lote_pago(db: Session, *, lote_id: int, page: int = 1, limit: int = 50) -> dict:
-    exists = db.query(LotePago.id).filter(LotePago.id == lote_id).first()
-    if not exists:
+    lote = db.query(LotePago).filter(LotePago.id == lote_id).first()  # CAMBIO
+    if not lote:
         raise HTTPException(status_code=404, detail="Lote no encontrado")
 
-    base_q = db.query(DetallePago).filter(DetallePago.lote_id == lote_id)
-    total = base_q.with_entities(func.count(DetallePago.id)).scalar() or 0
+    base_q = (
+        db.query(
+            DetallePago,
+            ExpedienteElectronico,
+            CatDepartamento,  # CAMBIO
+            CatMunicipio,  # CAMBIO
+        )
+        .outerjoin(
+            ExpedienteElectronico,
+            ExpedienteElectronico.id == DetallePago.expediente_id,
+        )
+        .outerjoin(  # CAMBIO
+            CatDepartamento,
+            CatDepartamento.id == ExpedienteElectronico.departamento_id,
+        )
+        .outerjoin(  # CAMBIO
+            CatMunicipio,
+            CatMunicipio.id == ExpedienteElectronico.municipio_id,
+        )
+        .filter(DetallePago.lote_id == lote_id)
+    )
+
+    total = (
+        db.query(func.count(DetallePago.id))
+        .filter(DetallePago.lote_id == lote_id)
+        .scalar()
+        or 0
+    )  # CAMBIO
+
     offset = (page - 1) * limit
 
     rows = (
@@ -738,21 +765,31 @@ def listar_items_lote_pago(db: Session, *, lote_id: int, page: int = 1, limit: i
     )
 
     data = []
-    for it in rows:
+    for it, exp, dep, mun in rows:  # CAMBIO
         data.append({
             "id": it.id,
             "lote_id": it.lote_id,
             "expediente_id": it.expediente_id,
+
+            "departamento": dep.nombre if dep else None,  # CAMBIO
+            "municipio": mun.nombre if mun else None,  # CAMBIO
+
             "anio_fiscal": it.anio_fiscal,
             "mes_fiscal": it.mes_fiscal,
             "estado": it.estado,
             "monto_asignado": float(it.monto_asignado),
+
+            "numero_pago": getattr(lote, "numero_pago", None),  # CAMBIO
+
             "acumulado_pagado_antes": float(it.acumulado_pagado_antes) if it.acumulado_pagado_antes is not None else None,
             "excede_tope": bool(it.excede_tope),
             "cui_beneficiario": it.cui_beneficiario,
             "nombre_beneficiario": it.nombre_beneficiario,
             "banco_codigo": it.banco_codigo,
+
+            "titular": exp.titular_nombre if exp else None,  # CAMBIO
             "numero_cuenta": it.numero_cuenta,
+
             "motivo_rechazo": it.motivo_rechazo,
             "referencia_externa": it.referencia_externa,
             "procesado_en": it.procesado_en,

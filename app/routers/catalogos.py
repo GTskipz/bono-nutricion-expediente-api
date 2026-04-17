@@ -14,7 +14,9 @@ from app.schemas.cat_estado_flujo_expediente import EstadoFlujoExpedienteOut
 
 from app.services.catalogos_service import (
     get_departamentos,
+    get_departamentos_con_estado_flujo_7_por_anio,
     get_municipios,
+    get_municipios_con_estado_flujo_7_por_anio,
     get_tipos_documento_activos,
     get_areas_salud,
     get_distritos_salud,
@@ -91,3 +93,23 @@ def listar_estados_flujo_expediente(
     db: Session = Depends(get_db),
 ):
     return get_estados_flujo_expediente(db, solo_activos=solo_activos)
+
+
+@router.get("/departamentos-con-flujo-7", response_model=list[DepartamentoOut])
+def listar_departamentos_con_flujo_7(
+    anio: int,  # CAMBIO
+    db: Session = Depends(get_db)
+):
+    return get_departamentos_con_estado_flujo_7_por_anio(db, anio)
+
+@router.get("/municipios-con-flujo-7", response_model=list[MunicipioOut])
+def listar_municipios_con_flujo_7(
+    departamento_id: int = Query(...),
+    anio: int = Query(...),  # CAMBIO
+    db: Session = Depends(get_db),
+):
+    return get_municipios_con_estado_flujo_7_por_anio(
+        db,
+        departamento_id,
+        anio,
+    )

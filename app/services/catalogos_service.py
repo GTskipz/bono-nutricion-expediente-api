@@ -12,6 +12,8 @@ from app.models.cat_servicio_salud import CatServicioSalud
 from app.models.cat_sexo import CatSexo
 from sqlalchemy import text
 
+from app.models.expediente_electronico import ExpedienteElectronico
+
 
 def get_departamentos(db: Session) -> List[CatDepartamento]:
     return db.query(CatDepartamento).order_by(CatDepartamento.nombre.asc()).all()
@@ -114,3 +116,43 @@ def get_estados_flujo_expediente(db: Session, solo_activos: bool = True):
     """
     rows = db.execute(text(sql), {"solo_activos": solo_activos}).mappings().all()
     return [dict(r) for r in rows]
+
+def get_departamentos_con_estado_flujo_7_por_anio(
+    db: Session,
+    anio: int,  # CAMBIO
+) -> List[CatDepartamento]:
+    return (
+        db.query(CatDepartamento)
+        .join(
+            ExpedienteElectronico,
+            ExpedienteElectronico.departamento_id == CatDepartamento.id
+        )
+        .filter(
+            ExpedienteElectronico.estado_flujo_id == 7,
+            ExpedienteElectronico.anio_carga == anio,  # CAMBIO
+        )
+        .distinct()
+        .order_by(CatDepartamento.nombre.asc())
+        .all()
+    )
+
+def get_municipios_con_estado_flujo_7_por_anio(
+    db: Session,
+    departamento_id: int,
+    anio: int,  # CAMBIO
+) -> List[CatMunicipio]:
+    return (
+        db.query(CatMunicipio)
+        .join(
+            ExpedienteElectronico,
+            ExpedienteElectronico.municipio_id == CatMunicipio.id
+        )
+        .filter(
+            CatMunicipio.departamento_id == departamento_id,
+            ExpedienteElectronico.estado_flujo_id == 7,
+            ExpedienteElectronico.anio_carga == anio,  # CAMBIO
+        )
+        .distinct()
+        .order_by(CatMunicipio.nombre.asc())
+        .all()
+    )

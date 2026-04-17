@@ -851,7 +851,7 @@ def actualizar_titular_y_estado_flujo(
     titular_nombre: str | None,
     titular_dpi: str | None,
     personalizado: bool = False,
-    usuario_nombre: str | None = None, # SE AGREGA PARÁMETRO PARA AUDITORÍA
+    usuario_nombre: str | None = None,  # CAMBIO
 ):
     estado_codigo = (
         "TITULAR_PERSONALIZADO_PENDIENTE"
@@ -912,19 +912,20 @@ def actualizar_titular_y_estado_flujo(
     if not row:
         return None
 
-    # ✅ TRACKING IMPORTANTE: titular cargado / actualizado
     TrackingEventoService._registrar(
         db,
         expediente_id=int(expediente_id),
         titulo="Titular cargado" if not personalizado else "Titular personalizado pendiente",
         origen=TrackingEventoService.ORIGEN_EXPEDIENTE,
         tipo_evento="TITULAR_CARGADO" if not personalizado else "TITULAR_PERSONALIZADO_PENDIENTE",
-        usuario=usuario_nombre, # SE CAMBIA None POR EL USUARIO REAL
-        observacion=(f"{titular_nombre or ''} | {titular_dpi or ''}" if not personalizado else None),
+        usuario=usuario_nombre,  # CAMBIO
+        observacion=(
+            f"{titular_nombre or ''} | {titular_dpi or ''}"
+            if not personalizado
+            else None
+        ),
         commit=False,
     )
-
-    db.commit()
 
     return {
         "expediente_id": row["id"],
@@ -1140,3 +1141,42 @@ def actualizar_telefono_encargado(
         "expediente_id": info.expediente_id,
         "telefonos_encargados": info.telefonos_encargados,
     }
+
+def rechazar_documentos_expediente(
+    db: Session,
+    expediente_id: int,
+    observacion: str,
+    usuario_nombre: str | None = None,
+):
+    row = db.execute(
+        text("""
+            UPDATE expediente_electronico
+            SET estado_flujo_id = (
+                SELECT id
+                FROM cat_estado_flujo_expediente
+                WHERE codigo = 'TITULAR_CARGADO'
+                LIMIT 1
+            ),
+            updated_at = NOW()
+            WHERE id = :id
+            RETURNING id, estado_flujo_id
+        """),
+        {"id": expediente_id},
+    ).mappings().first()
+
+    if not row:
+        return None
+
+    TrackingEventoService._registrar(
+        db,
+        expediente_id=int(expediente_id),
+        titulo="Documentos rechazados",
+        origen=TrackingEventoService.ORIGEN_DOCUMENTOS,
+        tipo_evento="DOCS_RECHAZADOS",
+        usuario=usuario_nombre,
+        observacion=observacion,
+        commit=False,
+    )
+
+    db.commit()
+    return dict(row)

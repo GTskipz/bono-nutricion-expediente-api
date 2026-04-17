@@ -212,3 +212,6 @@ class PersonaExpedienteRequest(BaseModel):
 
 class ActualizarTelefonoEncargadoRequest(BaseModel):
     telefonos_encargados: str | None = None
+
+class RechazoDocumentosRequest(BaseModel):
+    observacion: str = Field(..., min_length=1, max_length=1000)

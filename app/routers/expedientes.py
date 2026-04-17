@@ -27,7 +27,8 @@ from app.schemas.expediente import (
     ExpedienteSearchResponse,
     ExpedienteTitularIn,
     PersonaExpedienteRequest,
-    PersonaExpedienteResponse
+    PersonaExpedienteResponse,
+    RechazoDocumentosRequest
 )
 from app.schemas.tracking_evento import TrackingCreate, TrackingOut
 
@@ -40,7 +41,8 @@ from app.services.expedientes_service import (
     obtener_expediente_detalle,
     buscar_expedientes,
     listar_documentos_expediente,
-    pasar_a_gestion, 
+    pasar_a_gestion,
+    rechazar_documentos_expediente, 
     validar_tab,
     upload_documento_por_id_core,
     upload_documento_por_tipo_core,
@@ -262,46 +264,34 @@ async def registrar_titular(
     db: Session = Depends(get_db),
     auth: AuthContext = Depends(require_auth_context),
 ):
-
-    # AJUSTE: Se toma el 'username' directamente de la raíz del objeto auth.user
     usuario_nombre = None
     if auth and auth.user:
-        usuario_nombre = auth.user.get("username")
-
-    # --- PRUEBA DE DEBUG (CORREGIDA) ---
-    print(f"DEBUG: Contenido del token: {auth.user}") 
-    print(f"DEBUG: Username extraído: {usuario_nombre}")
-    # -----------------------------------
-
-    try:
-        row = actualizar_titular_y_estado_flujo(
-            db,
-            expediente_id=expediente_id,
-            titular_nombre=payload.titular_nombre,
-            titular_dpi=payload.titular_dpi,
-            personalizado=payload.personalizado,
-            usuario_nombre=usuario_nombre,
+        usuario_nombre = (
+            auth.user.get("username")  # CAMBIO
+            or auth.user.get("preferred_username")  # CAMBIO
+            or auth.user.get("sub")  # CAMBIO
         )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
-    if not row:
-        raise HTTPException(status_code=404, detail="Expediente no encontrado")
+    print(f"DEBUG: Contenido del token: {auth.user}")
+    print(f"DEBUG: Username extraído: {usuario_nombre}")
 
-    # ✅ BPM (sin tocar BD)
     try:
         bpm = BpmServiceTaskTitular(db)
-        await bpm.procesar_titular(
+        result = await bpm.procesar_titular(
             expediente_id=expediente_id,
             nombre_titular=payload.titular_nombre,
             dpi_titular=payload.titular_dpi,
             tiene_copia_recibo=True,
             tiene_copia_dpi=True,
+            usuario_nombre=usuario_nombre,  # CAMBIO
         )
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Error enviando titular a BPM: {str(e)}")
 
-    return row
+        return result["expediente"]
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
 @router.post("/{expediente_id}/documentos/confirmar")
 async def confirmar_docs(expediente_id: int, db: Session = Depends(get_db), auth: AuthContext = Depends(require_auth_context)):
@@ -415,3 +405,24 @@ def actualizar_telefono_encargado_endpoint(
         expediente_id=expediente_id,
         telefonos_encargados=payload.telefonos_encargados,
     )
+
+@router.post("/{expediente_id}/documentos/rechazar")
+def rechazar_docs(
+    expediente_id: int,
+    payload: RechazoDocumentosRequest,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(require_auth_context),
+):
+    usuario_nombre = auth.user.get("username") if auth else None
+
+    row = rechazar_documentos_expediente(
+        db=db,
+        expediente_id=expediente_id,
+        observacion=payload.observacion,
+        usuario_nombre=usuario_nombre,
+    )
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Expediente no encontrado")
+
+    return row
